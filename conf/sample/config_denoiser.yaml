@@ -1,0 +1,18 @@
+# Path to the training configuration file.
+train_config_path: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-15/19-41-44/.hydra/config.yaml"
+
+# Path to the model checkpoint file.
+checkpoint_path: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-15/19-41-44/checkpoints/periodic-epoch=284-step=100000.ckpt"
+
+# --- Sampling Parameters ---
+use_ema: true
+n_samples: 2048
+n_steps: 250
+output_filename: "ema_direct_samples.png"
+batch_size: 512
+compute_fid: true
+
+# Hydra setting for the output directory
+hydra:
+  run:
+    dir: outputs/sampling_denoiser/${now:%Y-%m-%d}/${now:%H-%M-%S}

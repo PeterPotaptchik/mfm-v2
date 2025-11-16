@@ -1,0 +1,24 @@
+train_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/2025-09-03/16-54-27"
+# train_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/default/cifar"
+hydra:
+  run:
+    dir: "${train_dir}/sampling"
+
+train_config: "${train_dir}/.hydra/config.yaml"
+checkpoint_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/2025-09-03/16-54-27/checkpoints/periodic-epoch=284-step=100000.ckpt"
+# checkpoint_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/default/cifar/periodic-epoch=284-step=100000.ckpt"
+use_ema: false
+compute_fid: false
+
+n_conditioning_samples: 20
+samples_per_image: 8
+batch_size: 20
+conditioning_times: [0.25, 0.50, 0.70, 0.80]
+posterior_sampler: "consistency" # ode, consistency, distributional
+seed: 42
+
+consistency:
+  steps: 1
+
+ode:
+  steps: 10

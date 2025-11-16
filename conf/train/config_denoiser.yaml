@@ -1,0 +1,34 @@
+defaults:
+  - _self_
+  - model: unet_cifar_denoiser # mlp, unet (add variants), (add DiT)
+  - dataset: cifar # mnist, gmm (add variants)
+  - sde: vpsde
+
+resume_from_checkpoint: null
+use_snr_parametrisation: false   
+
+lr:
+  val: 0.0003
+  scheduler: cosine
+  warmup_steps: 2000
+  min_lr: 0.00001
+  
+trainer:
+  num_train_steps: 200000
+  batch_size: 850
+  ema:
+    enabled: true
+    decay: 0.999
+  accelerator: "cuda"
+  devices: 1
+  log_every_n_steps: 25
+
+sampling:
+  every_n_steps: 10000
+
+wandb:
+  project: "ablations"
+  entity: "distcfm"
+  name: "test"
+
+data_dir: /vols/bitbucket/saravanan/distributional-mf/data

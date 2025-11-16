@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+
+dataset: mnist_multiclass 
+
+dist_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/mnist/dfm"
+dist_checkpoint_dir:  "/vols/bitbucket/saravanan/distributional-mf/outputs/mnist/dfm/periodic-epoch=465-step=100000.ckpt"
+uncond_dir:  "/vols/bitbucket/saravanan/distributional-mf/outputs/mnist/denoiser"
+uncond_checkpoint_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/mnist/denoiser/mnist-denoiser-periodic-epoch=465-step=100000.ckpt"
+
+guidance_classifier: "/vols/bitbucket/saravanan/distributional-mf/classifiers/mnist_0/checkpoint_best.pt"
+eval_classifier: "/vols/bitbucket/saravanan/distributional-mf/classifiers/mnist_42/checkpoint_best.pt"
+
+dist_config: "${dist_dir}/.hydra/config.yaml"
+uncond_config: "${uncond_dir}/.hydra/config.yaml"
+
+seed: 42
+weights_to_sample: [1, 0, 0, 1, 0, 0, 0, 0.5, 0, 2]
+total_samples: 10000
+
+hydra:
+  run:
+    dir: "${dist_dir}/sampling/multiclass_conditional"
+
+use_ema: true
+
+conditional_score: "iwae" # dps, iwae, mc
+
+iwae:
+  n_samples: 1
+  type: "cfm" # cfm_approximate
+  
+sampling:
+  batch_size: 1024
+  euler_steps: 500
+  clip_each_step: True
+
+data_dir: /vols/bitbucket/saravanan/distributional-mf/data

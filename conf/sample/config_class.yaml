@@ -1,0 +1,42 @@
+defaults:
+  - _self_
+
+dataset: cifar10 
+
+dist_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-08/17-48-55/"
+# dist_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/default/cifar/"
+uncond_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-27/09-19-24/"
+# uncond_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/denoisers/cifar"
+dist_checkpoint_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-08/17-48-55/checkpoints/periodic-epoch=284-step=100000.ckpt"
+# dist_checkpoint_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/default/cifar/periodic-epoch=284-step=100000.ckpt"
+uncond_checkpoint_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-27/09-19-24/checkpoints/periodic-epoch=568-step=100000.ckpt"
+# uncond_checkpoint_dir: "/vols/bitbucket/saravanan/distributional-mf/outputs/denoisers/cifar/denoiser-periodic-epoch=284-step=100000.ckpt"
+
+# guidance_classifier: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/classifiers/mnist_0/checkpoint_best.pt"
+guidance_classifier: "ahsanjavid/convnext-tiny-finetuned-cifar10" 
+# eval_classifier:  "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/classifiers/mnist_42/checkpoint_best.pt"
+eval_classifier: "nateraw/vit-base-patch16-224-cifar10"
+
+dist_config: "${dist_dir}/.hydra/config.yaml"
+uncond_config: "${uncond_dir}/.hydra/config.yaml"
+
+seed: 42
+labels_to_sample: [0, 3, 7]
+samples_per_label: 64
+
+hydra:
+  run:
+    dir: "${dist_dir}/sampling/class_conditional"
+
+use_ema: true
+
+conditional_score: "iwae" # dps, iwae, mc
+
+iwae:
+  n_samples: 1
+
+sampling:
+  batch_size: 16
+  euler_steps: 100
+  clip_each_step: False
+  t_eps: 0.01

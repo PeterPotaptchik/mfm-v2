@@ -1,0 +1,3 @@
+name: mnist
+img_resolution: 28
+img_channels: 1

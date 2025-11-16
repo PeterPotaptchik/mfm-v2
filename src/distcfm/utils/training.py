@@ -1,0 +1,301 @@
+import os
+import math
+import tqdm 
+
+import torch
+import lightning as pl
+from lightning.pytorch.callbacks import Callback
+import torchvision
+import wandb
+import matplotlib.pyplot as plt
+
+from distcfm.utils.evaluation import posterior_sampling_fn, plot_posterior_samples
+
+def broadcast_to_shape(tensor, shape):
+    return tensor.view(-1, *((1,) * (len(shape) - 1)))
+
+class TrainingModule(pl.LightningModule):
+    def __init__(self, cfg, model, loss_fn, SI):
+        super().__init__()
+        self.model = model
+        self.loss_fn = loss_fn
+        self.cfg = cfg
+        self.SI = SI
+
+        if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
+            self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
+
+    def forward(self, x):
+        return self.model(x)
+
+    def setup(self, stage: str):
+        return
+
+    def training_step(self, batch, batch_idx):
+        try:
+            x, labels = batch
+        except:
+            x = batch      
+            labels = None 
+        step = self.global_step
+
+        if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
+            prob = self.cfg.trainer.class_dropout_prob
+            mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
+            labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
+
+        losses, aux_losses = self.loss_fn(self.model, x, labels, step)
+        for name, loss in losses.items():
+            self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        for name, loss in aux_losses.items():
+            self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+
+        total_loss = 0
+
+        for name, loss in losses.items():
+            if name == "distillation_loss":
+                total_loss += loss * self.cfg.loss.distillation_weight
+            else:
+                total_loss += loss
+
+        self.log("train/total_loss", total_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        
+        current_lr = self.optimizers().param_groups[0]['lr']
+        self.log("train/lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+        return total_loss
+
+    def on_before_optimizer_step(self, optimizer,):
+        if self.global_step % 10 == 0:
+            total_norm = torch.norm(torch.stack([
+                p.grad.detach().norm(2)
+                for p in self.parameters() if p.grad is not None
+            ]))
+            self.log("grad_l2_norm", total_norm, on_step=True, prog_bar=True)
+
+    def validation_step(self, batch, batch_idx):
+        """Run validation with EMA parameters"""
+        try:
+            x, labels = batch
+        except:
+            x = batch
+            labels = None 
+        
+        if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
+            prob = self.cfg.trainer.class_dropout_prob
+            mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
+            labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
+
+        ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, x, labels, self.global_step)
+        for name, loss in ema_val_loss.items():
+            self.log(f"val_ema/{name}", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        for name, loss in ema_val_aux_losses.items():
+            self.log(f"val_ema/{name}", loss, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+        ema_total_loss = sum(ema_val_loss.values())
+
+        self.log("val_ema/total_loss", ema_total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        return ema_total_loss
+            
+    def configure_optimizers(self):
+        if self.cfg.optimizer == "RAdam":
+            optimizer = torch.optim.RAdam(self.parameters(), lr=self.cfg.lr.val)
+        else:
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.lr.val)
+
+        
+        if self.cfg.lr.scheduler == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=max(1, self.cfg.trainer.num_train_steps - self.cfg.lr.warmup_steps),
+                eta_min=self.cfg.lr.min_lr
+            )
+        elif self.cfg.lr.scheduler == "constant":
+            scheduler = torch.optim.lr_scheduler.ConstantLR(
+                optimizer, 
+                factor=1.0, 
+                total_iters=float('inf')
+            )
+        else:
+            raise ValueError(f"Unknown scheduler type: {self.cfg.lr.scheduler}")
+        
+        if self.cfg.lr.warmup_steps > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=self.cfg.lr.warmup_steps
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, scheduler],
+                milestones=[self.cfg.lr.warmup_steps]
+            )
+    
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            }
+        }
+
+
+from distcfm.SI.samplers import kernel_sampler_fn
+
+class SamplingCallback(Callback):
+    """Callback for generating and saving samples during training"""
+    def __init__(self, cfg, test_data, inverse_scaler, SI):
+        super().__init__()
+        self.cfg = cfg
+        self.test_data = test_data
+        self.inverse_scaler = inverse_scaler
+        self.SI = SI
+        self.image_shape = (
+            self.cfg.dataset.img_channels, 
+            self.cfg.dataset.img_resolution, 
+            self.cfg.dataset.img_resolution
+        )
+        # for generating x_t
+        self.shared_noise = torch.randn(
+            self.cfg.sampling.n_conditioning_samples, 
+            *self.image_shape
+        )
+        # for sampling from the posterior
+        self.shared_posterior_noise = torch.randn(self.cfg.sampling.n_samples_per_image*self.cfg.sampling.n_conditioning_samples,
+                                                  *self.image_shape)
+        self._last_sampled_step = -1 
+        
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if (trainer.global_step + 1) % self.cfg.sampling.every_n_steps == 0 and (trainer.global_step != self._last_sampled_step):
+            self._last_sampled_step = trainer.global_step
+            
+            for n_steps in self.cfg.sampling.n_kernel_steps:
+                unconditional_samples_kernel = kernel_sampler_fn(
+                    pl_module.model,
+                    shape=self.image_shape,
+                    SI=self.SI,
+                    n_samples=self.cfg.sampling.n_unconditional_samples,
+                    n_batch_size=self.cfg.sampling.batch_size,
+                    n_steps=n_steps,
+                    inverse_scaler_fn=self.inverse_scaler
+                )
+                unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
+                self._save_samples_unconditional(
+                    pl_module, unconditional_samples_kernel, 
+                    title=f"unconditional_samples_kernel_{n_steps}"
+                )
+
+            for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+                ode_x_t, ode_x_0 = self._sample_batch(
+                    pl_module, t_cond, self.cfg.ode_sampling_cfg
+                )
+                ode_x_t, ode_x_0 = ode_x_t.clamp(0.0, 1.0), ode_x_0.clamp(0.0, 1.0)
+                self._save_samples(
+                    pl_module, ode_x_t, ode_x_0, t_cond, 
+                    "ode", steps=None
+                )
+
+                for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
+                    sampling_cfg = self.cfg.consistency_sampling_cfg.copy()
+                    sampling_cfg.consistency.steps = n_steps
+                    cons_x_t, cons_x_0 = self._sample_batch(
+                        pl_module, t_cond, sampling_cfg
+                    )
+                    cons_x_t, cons_x_0 = cons_x_t.clamp(0.0, 1.0), cons_x_0.clamp(0.0, 1.0)
+                    self._save_samples(
+                        pl_module, cons_x_t, cons_x_0, t_cond,
+                        "consistency", steps=n_steps
+                    )
+
+    def _sample_batch(self, pl_module, t_cond, sampling_cfg):
+        x_t_list, x_1_list = [], []
+        bs = self.cfg.sampling.batch_size
+        m = self.cfg.sampling.n_samples_per_image
+        for i in tqdm.tqdm(
+            range(self.cfg.sampling.n_conditioning_samples // self.cfg.sampling.batch_size), 
+            desc="Batches"
+        ):
+            x1_data = self.test_data[i*bs:(i+1)*bs].to(pl_module.device)
+            x0_data = self.shared_noise[i*bs:(i+1)*bs].to(pl_module.device)
+            eps_start = self.shared_posterior_noise[i*(bs*m):(i+1)*(bs*m)].to(pl_module.device)
+            t_cond_tensor = torch.full((bs,), t_cond, device=pl_module.device)
+
+            # generate noisy input
+            alpha_t, beta_t = self.SI.get_coefficients(t_cond_tensor) # Shape: [B,]
+            alpha_t, beta_t = broadcast_to_shape(alpha_t, x1_data.shape), broadcast_to_shape(beta_t, x1_data.shape)
+            xt_data = alpha_t * x0_data + beta_t * x1_data
+            
+            with torch.no_grad():
+                xt, x1 = posterior_sampling_fn(
+                    sampling_cfg,
+                    pl_module.model,
+                    xt_data,
+                    t_cond_tensor,
+                    n_samples_per_image=m,
+                    inverse_scaler=self.inverse_scaler,
+                    eps_start=eps_start,
+                )
+            x_t_list.append(xt)
+            x_1_list.append(x1)
+        
+        return torch.cat(x_t_list, dim=0), torch.cat(x_1_list, dim=0)
+    
+    def _save_samples(self, pl_module, x_t, x_0, t_cond, sample_type, steps=None):
+        save_dir = os.path.join(self.cfg.work_dir, f"samples_{pl_module.global_step}_ema")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Generate file name
+        steps_str = f"_steps_{steps}" if steps is not None else ""
+        base_name = f"{sample_type}_samples_t_{t_cond}{steps_str}"
+        
+        # Save plot
+        title = f"{sample_type.title()} Samples at t = {t_cond}"
+        if steps is not None:
+            title += f" with {steps} steps"
+
+        save_dict = {
+            'x_t': x_t.cpu(),
+            'x_0_samples': x_0.cpu(),
+            't_cond': t_cond,
+        }
+        if steps is not None:
+            save_dict['n_steps'] = steps
+                    
+        fig = plot_posterior_samples(self.inverse_scaler(self.test_data[0:10].cpu().numpy()),
+                                     x_t[0:10].cpu().numpy(),
+                                     x_0[0:10, 0:10].cpu().numpy(),
+                                     os.path.join(save_dir, f"{base_name}.png"),
+                                     title)
+        pl_module.logger.experiment.log({
+            f"val/{base_name}_grid_ema": [wandb.Image(fig)],
+            "global_step": pl_module.global_step
+        })
+        plt.close(fig)
+        torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))
+
+    def _save_samples_unconditional(self, pl_module, samples, title):
+        save_dir = os.path.join(self.cfg.work_dir, f"samples_{pl_module.global_step}_ema")
+        os.makedirs(save_dir, exist_ok=True)
+
+        base_name = f"unconditional_samples_{title}"
+        
+        N = samples.shape[0]
+        nrow = math.ceil(math.sqrt(N))
+        grid = torchvision.utils.make_grid(samples, nrow=nrow, padding=2)
+        
+        save_dict = {
+            'samples': samples.cpu(),
+            'sampler': title,
+        }
+
+        pl_module.logger.experiment.log({
+            f"val/unconditional_grid_ema_{title}": [wandb.Image(grid)],
+            "global_step": pl_module.global_step
+        })
+
+        torchvision.utils.save_image(
+            grid,
+            os.path.join(save_dir, f"{base_name}.png"),
+        )
+        
+        torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))

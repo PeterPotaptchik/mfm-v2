@@ -1,0 +1,10 @@
+_target_: distcfm.models.UNet
+img_resolution: ${dataset.img_resolution}
+img_channels: ${dataset.img_channels}
+label_dim: 0 # unconditional!
+model_channels: 128
+channel_mult: [1, 2, 2, 2]
+channel_mult_noise: 3
+attn_resolutions: [16, 8]
+logvar_channels: 256 # has to match model_channels * 2
+learn_loss_weighting: true

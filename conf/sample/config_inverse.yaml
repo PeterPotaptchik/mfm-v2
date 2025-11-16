@@ -1,0 +1,30 @@
+defaults:
+  - _self_
+  - inverse_problem: inpainting # sr, inpainting, deblur
+
+dist_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-08/17-48-55/"
+uncond_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-20/14-34-23/"
+dist_checkpoint_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-08/17-48-55/checkpoints/periodic-epoch=284-step=100000.ckpt"
+uncond_checkpoint_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-08-20/14-34-23/checkpoints/periodic-epoch=568-step=100000.ckpt"
+
+dist_config: "${dist_dir}/.hydra/config.yaml"
+uncond_config: "${uncond_dir}/.hydra/config.yaml"
+
+seed: 42
+
+hydra:
+  run:
+    dir: "${dist_dir}/sampling/inverse_problems"
+
+use_ema: true
+
+conditional_score: "iwae" # dps, iwae
+
+iwae:
+  n_samples: 2
+
+sampling:
+  batch_size: 16
+  n_samples: 16
+  euler_steps: 100
+  clip_each_step: True

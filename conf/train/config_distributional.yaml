@@ -1,0 +1,56 @@
+defaults:
+  - _self_
+  - model: unet_cifar_distributional # mlp, unet (add variants), (add DiT)
+  - dataset: cifar # mnist, gmm (add variants)
+  - sde: vpsde
+
+resume_from_checkpoint: null
+
+loss:
+  m: 2
+  rho: norm # norm, rbf, imq, exp
+  rbf_sigma: 1.0
+  exp_sigma: 1.0
+  imq_c: 1.0
+  beta: 0.1 
+  lambda_: 1.0
+  loss_weighting: sigmoid # constant, sigmoid
+  loss_weighting_beta: 0.0
+
+lr:
+  val: 0.0003
+  scheduler: "constant"
+  warmup_steps: 0 
+  min_lr: 0.00001
+
+trainer:
+  num_train_steps: 100000 
+  batch_size: 128 
+  ema:
+    decay: 0.999
+  devices: "auto"
+  log_every_n_steps: 25
+  accumulate_grad_batches: 1
+  precision: "bf16-mixed"
+
+sampling:
+  every_n_steps: 10000
+  n_conditioning_samples: 64
+  batch_size: 32
+  conditioning_times:
+  - 0.05
+  - 0.25
+  - 0.5
+  - 0.75
+  - 0.95
+
+dist_sampling_cfg:
+  samples_per_image: 16
+  posterior_sampler: "distributional_diffusion"
+
+wandb:
+  project: "ablations"
+  entity: "distcfm"
+  name: "test"
+
+data_dir: "/vols/bitbucket/saravanan/distributional-mf"

@@ -1,0 +1,11 @@
+_target_: distcfm.models.UNetAmort
+img_resolution: ${dataset.img_resolution}
+img_channels: ${dataset.img_channels}
+label_dim: 21000 
+model_channels: 256
+channel_mult: [1, 2, 3, 4]
+channel_mult_noise: 4
+attn_resolutions: [32, 16, 8]
+learn_loss_weighting: true
+weight_on_t_cond: true
+num_blocks: 4

@@ -1,0 +1,30 @@
+defaults:
+  - _self_
+
+dataset: cifar10_multiclass 
+dist_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/cifar/2025-08-26/22-05-47"
+dist_checkpoint_dir: "/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/cifar/2025-08-26/22-05-47/checkpoints/periodic-epoch=5714-step=280000.ckpt"
+dist_config: "${dist_dir}/.hydra/config.yaml"
+
+guidance_classifier: "ahsanjavid/convnext-tiny-finetuned-cifar10" 
+eval_classifier: "nateraw/vit-base-patch16-224-cifar10"
+
+seed: 42
+weights_to_sample: [1, 1, 0, 2, 0, 0, 0, 4, 0, 8]
+total_samples: 1000
+
+hydra:
+  run:
+    dir: "${dist_dir}/sampling/multiclass_conditional"
+
+use_ema: true
+
+conditional_score: "iwae" # dps, iwae, mc
+
+iwae:
+  n_samples: 1
+
+sampling:
+  batch_size: 512
+  euler_steps: 200
+  clip_each_step: True

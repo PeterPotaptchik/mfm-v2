@@ -1,0 +1,38 @@
+[project]
+name = "distcfm"
+version = "0.1.0"
+description = "Distributional diffusion via flow maps"
+requires-python = ">=3.9, <=3.13"
+
+dependencies = [
+  "torch",
+  "torchvision",
+  "pytorch-lightning",
+  "lightning==2.6.0.dev20251019",
+  "hydra-core",
+  "wandb", 
+  "numpy",
+  "omegaconf",
+  "scikit-learn",
+  "matplotlib",
+  "gpustat",
+  "torchsummary",
+  "ipykernel",
+  "torch-ema",
+  "torch_utils",
+  "torchdiffeq",
+  "clean-fid",
+  "timm",
+  "torchmetrics",
+  "transformers"
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

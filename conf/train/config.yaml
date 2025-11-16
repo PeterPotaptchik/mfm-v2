@@ -1,0 +1,87 @@
+defaults:
+  - _self_
+  - model: unet_cifar
+  - dataset: cifar 
+  - SI: linear
+
+from_pretrained: false
+resume_from_checkpoint: null
+use_parametrization: false
+compile: true
+
+optimizer: "Adam"
+
+loss:
+  distillation_type: psd
+  fm_loss_type: l2
+  fm_adaptive_loss_p: 2.0
+  fm_adaptive_loss_c: 0.5
+  distillation_loss_type: l2
+  distill_teacher_stop_grad: true
+  distill_adaptive_loss_p: 2.0
+  distill_adaptive_loss_c: 0.5
+  explicit_v00_train: false
+  distillation_weight: 1.0
+
+lr:
+  val: 0.0003
+  scheduler: constant 
+  warmup_steps: 0 
+  min_lr: 0.00001
+
+trainer:
+  num_train_steps: 100000 
+  num_warmup_steps: 10000 
+  num_no_posterior_steps: 0
+  num_anneal_posterior_steps: 0
+  t_cond_warmup_steps: 0
+  t_cond_0_rate: 0.0
+  t_cond_power: 1.0
+  t_cond_anneal_end_step: 0
+  anneal_end_step: 50000
+  batch_size: 128 
+  ema:
+    decay: 0.999
+  devices: "auto"
+  log_every_n_steps: 25
+  accumulate_grad_batches: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 15.0
+
+sampling:
+  every_n_steps: 10000
+  batch_size: 8
+  n_conditioning_samples: 32
+  n_samples_per_image: 4
+  n_unconditional_samples: 64
+  conditioning_times:
+  - 0.00
+  - 0.20
+  - 0.50 
+  - 0.75
+  - 0.95
+  n_kernel_steps: 
+  - 10
+  kernel_churn: 0.0
+  n_v00_steps: 250
+
+ode_sampling_cfg:
+  posterior_sampler: ode
+  ode:
+    steps: 100
+
+consistency_sampling_cfg:
+  posterior_sampler: consistency
+  consistency:
+    steps: 1
+  steps_to_test:
+  - 1
+  - 5
+  - 10
+
+wandb:
+  project: ablations
+  entity: distcfm
+  name: default
+
+data_dir: /vols/bitbucket/saravanan/distributional-mf/data

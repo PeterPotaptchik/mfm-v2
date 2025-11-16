@@ -1,0 +1,9 @@
+_target_: distcfm.data.ImageNetLatentDataModule
+name: imagenet_latent
+data_dir: ${data_dir}
+img_resolution: 32   # latent spatial size (256px inputs with f8 VAE)
+img_channels: 4
+latent_dtype: float32
+train_split: imagenet21k_resized/imagenet21k_train_shuffled_v2
+val_split: imagenet21k_resized/imagenet21k_val
+precomputed: true

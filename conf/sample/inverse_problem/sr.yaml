@@ -1,0 +1,5 @@
+_target_: distcfm.utils.SuperResolution
+name: sr
+noise_sigma: 0.15
+factor: 2
+type: "bilinear"
