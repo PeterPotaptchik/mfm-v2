@@ -1,4 +1,4 @@
-_target_: distcfm.models.DiT
+_target_: distcfm.models.DiTMFM
 # TODO: Need to add these in
 learn_loss_weighting: true
 # weight_on_t_cond: true
@@ -8,15 +8,14 @@ input_size: ${dataset.img_resolution}
 patch_size: 2
 in_channels: ${dataset.img_channels}
 
-# === backbone size (≈ ViT-B / DiT-B) ===
-hidden_size: 1024          # D
-depth: 24                 # number of transformer blocks
+# === backbone size DiT_L_2 ===
+hidden_size: 1152          # D
+depth: 28                 # number of transformer blocks
 num_heads: 16              # heads per block
-mlp_ratio: 4.0
 
 # === conditioning ===
-label_dim: 0
-class_dropout_prob: 0.0   # no CFG during training (set >0 if you want CFG)
+label_dim: 21000
+class_dropout_prob: 0.3   # no CFG during training (set >0 if you want CFG)
 
 # === attention impl ===
 # use_fused_attn: true      # uses PyTorch SDPA (FlashAttention path when available)

@@ -7,3 +7,5 @@ latent_dtype: float32
 train_split: imagenet21k_resized/imagenet21k_train_shuffled_v2
 val_split: imagenet21k_resized/imagenet21k_val
 precomputed: true
+decoded_img_resolution: 256 
+decoded_img_channels: 3

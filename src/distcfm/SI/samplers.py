@@ -40,12 +40,12 @@ def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None):
         sampling_hist[i + 1] = xu
     return sampling_hist[-1]
 
-def kernel_sampler_fn(model, shape, SI, n_samples,
+def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                     n_batch_size, n_steps=1,
                     inverse_scaler_fn=lambda x: (x+1)/2,
                     x0=None):
     device = next(model.parameters()).device
-    samples = torch.zeros((n_samples, *shape), device=device)
+    samples = torch.zeros((n_samples, *shape_decoded), device=device)
     timesteps = torch.linspace(0.0, SI.t_max, n_steps + 1, device=device) 
 
     if x0 is None:
@@ -72,6 +72,9 @@ def kernel_sampler_fn(model, shape, SI, n_samples,
                 alpha_u, beta_u = broadcast_to_shape(alpha_u, x1.shape), broadcast_to_shape(beta_u, x1.shape)
                 xu = alpha_u * noise + beta_u * x1
                 xs = xu
+                del noise
+                del x1
+                del xu
 
-            samples[i * n_batch_size: (i + 1) * n_batch_size] = xu
-    return inverse_scaler_fn(samples)
+            samples[i * n_batch_size: (i + 1) * n_batch_size] = inverse_scaler_fn(xs)
+    return samples

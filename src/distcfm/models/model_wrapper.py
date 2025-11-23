@@ -40,6 +40,18 @@ class SIModelWrapper(BaseModel):
         else:
             return self.model.v(s, u, x, t_cond, x_cond, **kwargs)
 
+    def pop_gate_stats(self):
+        fn = getattr(self.model, "pop_gate_stats", None)
+        if callable(fn):
+            return fn()
+        return None
+
+    def pop_weighting_stats(self):
+        fn = getattr(self.model, "pop_weighting_stats", None)
+        if callable(fn):
+            return fn()
+        return None
+
 class DenoiserWrapper(torch.nn.Module):
     def __init__(self, model, SI, use_snr_parametrisation):
         super().__init__()

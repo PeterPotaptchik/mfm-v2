@@ -53,7 +53,7 @@ def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
 def get_consistency_loss_fn(cfg, SI):
-    def loss_fn(model, x1, labels, step):
+    def loss_fn(model, x1, labels, step, repa_model=None):
         # --- 1. Generate Conditioning Variables ---
         device = x1.device
         N = x1.shape[0]  # batch size
@@ -75,10 +75,19 @@ def get_consistency_loss_fn(cfg, SI):
         Is = (1 - expanded_s_uniform) * x0 + expanded_s_uniform * x1
         dIsds = x1 - x0
         
+        z_tilde = None
         if cfg.model.learn_loss_weighting:
-            fm_pred, fm_loss_weighting = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels, return_weighting=True)
+            ret = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels, return_weighting=True, return_projections=(repa_model is not None))
+            if repa_model is not None:
+                fm_pred, fm_loss_weighting, z_tilde = ret
+            else:
+                fm_pred, fm_loss_weighting = ret
         else:
-            fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
+            ret = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels, return_projections=(repa_model is not None))
+            if repa_model is not None:
+                fm_pred, z_tilde = ret
+            else:
+                fm_pred = ret
             fm_loss_weighting = torch.zeros_like(fm_pred)
 
         if cfg.loss.fm_loss_type == "l2":
@@ -90,6 +99,16 @@ def get_consistency_loss_fn(cfg, SI):
                                                         cfg.loss.fm_adaptive_loss_c)
         else:
             raise ValueError(f"Unknown flow matching loss type: {cfg.loss.fm_loss_type}")
+
+        # --- REPA Projection Loss ---
+        repa_loss = torch.tensor(0.0, device=device)
+        if repa_model is not None and z_tilde is not None:
+            with torch.no_grad():
+                z = repa_model(x1)
+
+            z_norm = torch.nn.functional.normalize(z, dim=-1)
+            z_tilde_norm = torch.nn.functional.normalize(z_tilde, dim=-1)
+            repa_loss = -(z_norm * z_tilde_norm).sum(dim=-1).mean()
 
         s, u = sample_s_u(N, step, cfg)  # [B,]
         s, u = s.to(device), u.to(device)
@@ -169,8 +188,8 @@ def get_consistency_loss_fn(cfg, SI):
             distillation_loss_unweighted = torch.tensor(0.0, device=device)
             
         if cfg.loss.explicit_v00_train:
-            x_zeros = torch.zeros_like(x)
-            t_zero = torch.zeros_like(t)
+            x_zeros = torch.zeros_like(x1)
+            t_zero = torch.zeros_like(t_cond)
             dI0dt = x1 
 
             if cfg.model.learn_loss_weighting:
@@ -189,7 +208,7 @@ def get_consistency_loss_fn(cfg, SI):
             fm0_loss = torch.tensor(0.0, device=device)
             fm0_loss_unweighted = torch.tensor(0.0, device=device)
 
-        return {"fm_loss": fm_loss, "distillation_loss": distillation_loss, "fm0_loss": fm0_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
+        return {"fm_loss": fm_loss, "distillation_loss": distillation_loss, "fm0_loss": fm0_loss, "repa_loss": repa_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
                                                                                                     "distillation_loss_unweighted": distillation_loss_unweighted,
                                                                                                     "fm0_loss_unweighted": fm0_loss_unweighted}
 

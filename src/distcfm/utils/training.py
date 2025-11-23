@@ -1,5 +1,6 @@
 import os
 import math
+import gc
 import tqdm 
 
 import torch
@@ -10,6 +11,7 @@ import wandb
 import matplotlib.pyplot as plt
 
 from distcfm.utils.evaluation import posterior_sampling_fn, plot_posterior_samples
+from distcfm.utils.repa_utils import RepaModel
 
 def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
@@ -21,15 +23,54 @@ class TrainingModule(pl.LightningModule):
         self.loss_fn = loss_fn
         self.cfg = cfg
         self.SI = SI
+        
+        # Use a list to avoid registering repa_model as a submodule
+        # This prevents it from being part of state_dict, so we don't need to load/save it
+        self._repa_model_container = [RepaModel(cfg)]
 
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
+
+    @property
+    def repa_model(self):
+        return self._repa_model_container[0]
 
     def forward(self, x):
         return self.model(x)
 
     def setup(self, stage: str):
         return
+
+    def on_train_start(self):
+        # Ensure repa_model is on the correct device
+        self.repa_model.to(self.device)
+
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Handle checkpoint loading for backward compatibility.
+        
+        Old checkpoints are missing:
+        1. The new proj_head weights (for REPA)
+        2. Optimizer state (if saved with save_weights_only=True)
+        
+        We load model weights with strict=False to allow missing proj_head,
+        which will be randomly initialized.
+        """
+        # Load model state with strict=False to allow missing keys (proj_head)
+        state_dict = checkpoint.get("state_dict", {})
+        
+        # Check if proj_head is missing (old checkpoint)
+        model_keys = set(self.state_dict().keys())
+        ckpt_keys = set(state_dict.keys())
+        missing_keys = model_keys - ckpt_keys
+        
+        proj_head_missing = any("proj_head" in k for k in missing_keys)
+        
+        if proj_head_missing:
+            print(f"\n{'='*60}")
+            print(f"Loading checkpoint with missing REPA projection head")
+            print(f"  proj_head will be randomly initialized")
+            print(f"{'='*60}\n")
 
     def training_step(self, batch, batch_idx):
         try:
@@ -44,7 +85,7 @@ class TrainingModule(pl.LightningModule):
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
-        losses, aux_losses = self.loss_fn(self.model, x, labels, step)
+        losses, aux_losses = self.loss_fn(self.model, x, labels, step, repa_model=self.repa_model)
         for name, loss in losses.items():
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         for name, loss in aux_losses.items():
@@ -55,6 +96,8 @@ class TrainingModule(pl.LightningModule):
         for name, loss in losses.items():
             if name == "distillation_loss":
                 total_loss += loss * self.cfg.loss.distillation_weight
+            elif name == "repa_loss":
+                total_loss += loss * self.cfg.loss.repa_weight
             else:
                 total_loss += loss
 
@@ -62,6 +105,20 @@ class TrainingModule(pl.LightningModule):
         
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log("train/lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+
+        gate_stats_fn = getattr(self.model, "pop_gate_stats", None)
+        if callable(gate_stats_fn):
+            gate_stats = gate_stats_fn()
+            if gate_stats is not None:
+                for name, value in gate_stats.items():
+                    self.log(f"train/{name}", value, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+
+        weighting_stats_fn = getattr(self.model, "pop_weighting_stats", None)
+        if callable(weighting_stats_fn):
+            weighting_stats = weighting_stats_fn()
+            if weighting_stats is not None:
+                for name, value in weighting_stats.items():
+                    self.log(f"train/{name}", value, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         return total_loss
 
     def on_before_optimizer_step(self, optimizer,):
@@ -96,10 +153,13 @@ class TrainingModule(pl.LightningModule):
         return ema_total_loss
             
     def configure_optimizers(self):
+        # Get only trainable parameters (excludes repa_model which is in a list)
+        params = [p for p in self.parameters() if p.requires_grad]
         if self.cfg.optimizer == "RAdam":
-            optimizer = torch.optim.RAdam(self.parameters(), lr=self.cfg.lr.val)
+            optimizer = torch.optim.RAdam(params, lr=self.cfg.lr.val, weight_decay=self.cfg.get("weight_decay", 0.0))
         else:
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.lr.val)
+            optimizer = torch.optim.Adam(params, lr=self.cfg.lr.val, weight_decay=self.cfg.get("weight_decay", 0.0))
+
 
         
         if self.cfg.lr.scheduler == "cosine":
@@ -166,13 +226,22 @@ class SamplingCallback(Callback):
         self._last_sampled_step = -1 
         
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not trainer.is_global_zero:
+            return
         if (trainer.global_step + 1) % self.cfg.sampling.every_n_steps == 0 and (trainer.global_step != self._last_sampled_step):
             self._last_sampled_step = trainer.global_step
+            was_training = pl_module.training
+            pl_module.eval()
             
             for n_steps in self.cfg.sampling.n_kernel_steps:
                 unconditional_samples_kernel = kernel_sampler_fn(
                     pl_module.model,
                     shape=self.image_shape,
+                    shape_decoded=(
+                        self.cfg.dataset.decoded_img_channels, 
+                        self.cfg.dataset.decoded_img_resolution, 
+                        self.cfg.dataset.decoded_img_resolution
+                    ),
                     SI=self.SI,
                     n_samples=self.cfg.sampling.n_unconditional_samples,
                     n_batch_size=self.cfg.sampling.batch_size,
@@ -184,6 +253,7 @@ class SamplingCallback(Callback):
                     pl_module, unconditional_samples_kernel, 
                     title=f"unconditional_samples_kernel_{n_steps}"
                 )
+                del unconditional_samples_kernel
 
             for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
                 ode_x_t, ode_x_0 = self._sample_batch(
@@ -194,6 +264,7 @@ class SamplingCallback(Callback):
                     pl_module, ode_x_t, ode_x_0, t_cond, 
                     "ode", steps=None
                 )
+                del ode_x_t, ode_x_0
 
                 for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
                     sampling_cfg = self.cfg.consistency_sampling_cfg.copy()
@@ -206,6 +277,11 @@ class SamplingCallback(Callback):
                         pl_module, cons_x_t, cons_x_0, t_cond,
                         "consistency", steps=n_steps
                     )
+                    del cons_x_t, cons_x_0
+            if was_training:
+                pl_module.train()
+            torch.cuda.empty_cache()
+            gc.collect()
 
     def _sample_batch(self, pl_module, t_cond, sampling_cfg):
         x_t_list, x_1_list = [], []
