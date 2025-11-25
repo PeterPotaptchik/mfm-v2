@@ -13,10 +13,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+# from timm.models.vision_transformer import Attention, PatchEmbed, Mlp
+from timm.models.vision_transformer import PatchEmbed, Mlp
+from distcfm.models.attention import Attention
 from distcfm.models.edm2 import MPConv, MPFourier
 from distcfm.models.base_model import BaseModel
-
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -118,7 +119,7 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, norm_layer=nn.LayerNorm, **block_kwargs)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -174,28 +175,32 @@ class DiT(nn.Module):
         z_dim=None,
         projector_dim=2048,
         encoder_depth=8,
-        qk_norm=True,
+        qk_norm=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
-        self.in_channels = in_channels * 2
+        self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.encoder_depth = encoder_depth
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels * 2, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_cond_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_cond_adaLN = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+        
         self.s_embedder = TimestepEmbedder(hidden_size)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.t_cond_embedder = TimestepEmbedder(hidden_size)
-        self.t_cond_gate = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, 1, bias=True),
-        )
+
+        self.s_embedder_second = TimestepEmbedder(hidden_size)
+        self.t_embedder_second = TimestepEmbedder(hidden_size)
 
         self.label_dim = label_dim
-        self.y_embedder = LabelEmbedder(label_dim + 1, hidden_size, class_dropout_prob, null_class_idx=label_dim)
+        self.y_embedder = LabelEmbedder(label_dim, hidden_size, class_dropout_prob, null_class_idx=label_dim)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -209,7 +214,6 @@ class DiT(nn.Module):
         if z_dim is not None:
             self.proj_head = build_mlp(hidden_size, projector_dim, z_dim)
 
-        self._gate_stats = []
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -230,12 +234,22 @@ class DiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
+        # Initialize x_cond_embedder to zero
+        nn.init.constant_(self.x_cond_embedder.proj.weight, 0)
+        nn.init.constant_(self.x_cond_embedder.proj.bias, 0)
+
+        # Initialize x_cond_adaLN to zero
+        nn.init.constant_(self.x_cond_adaLN[-1].weight, 0)
+        nn.init.constant_(self.x_cond_adaLN[-1].bias, 0)
+
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.t_embedder_second.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.s_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.s_embedder_second.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -254,12 +268,6 @@ class DiT(nn.Module):
                     torch.nn.init.xavier_uniform_(m.weight)
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
-        for m in self.t_cond_gate[:-1]:
-            if isinstance(m, nn.Linear):
-                torch.nn.init.xavier_uniform_(m.weight)
-                nn.init.constant_(m.bias, 0)
-        nn.init.constant_(self.t_cond_gate[-1].weight, 0)
-        nn.init.constant_(self.t_cond_gate[-1].bias, 0)
 
     def unpatchify(self, x):
         """
@@ -283,50 +291,42 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        t_cond_scalar = t_cond
-        t_cond = self.t_cond_embedder(t_cond_scalar)
-        gate = self.t_cond_gate(t_cond)
-        delta_x_cond = 0 * torch.sigmoid(gate)
-        if self.training:
-            self._record_gate_stats(delta_x_cond)
-        base_t_cond = t_cond_scalar.view(-1, 1, 1, 1)
-        scale_x_cond = base_t_cond * (1.0 + delta_x_cond).view(-1, 1, 1, 1)
-        x = torch.concat([x, scale_x_cond * x_cond], dim=1)
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2        
-        s = self.s_embedder(s)                   # (N, D)
-        t = self.t_embedder(t)                   # (N, D)
+        # Manually take all times to be 1-time to align with the SiT architecture
+        s = 1 - s
+        t = 1 - t
+        t_cond = 1 - t_cond
+
+        x_emb = self.x_embedder(x)
+        x_cond_emb = self.x_cond_embedder(x_cond)
+        
+        t_cond = self.t_cond_embedder(t_cond)
+        shift_cond, scale_cond = self.x_cond_adaLN(t_cond).chunk(2, dim=1)
+        x_cond_emb = modulate(x_cond_emb, shift_cond, scale_cond)
+        
+        x = x_emb + x_cond_emb + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2        
+        s_first = self.s_embedder(s)                   # (N, D)
+        t_first = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y + s + t_cond                   # (N, D)
+        c = s_first + t_first + t_cond + y               # (N, D)
         
         z_tilde = None
-        for i, block in enumerate(self.blocks):
+        for i, block in enumerate(self.blocks[:20]):
             x = block(x, c)                      # (N, T, D)
             if return_projections and self.z_dim is not None and (i + 1) == self.encoder_depth:
                  z_tilde = self.proj_head(x)
 
+        s_second = self.s_embedder_second(s)                   # (N, D)
+        t_second = self.t_embedder_second(t)                   # (N, D)
+        c = s_second + t_second + t_cond + y  
+        for i, block in enumerate(self.blocks[20:]):
+            x = block(x, c)                      # (N, T, D)
+            
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        
+        x = -x
         if return_projections:
              return x, z_tilde
         return x
-
-    def _record_gate_stats(self, delta_x_cond):
-        with torch.no_grad():
-            stats = {
-                "delta_x_cond_mean": delta_x_cond.mean().detach(),
-                "delta_x_cond_std": delta_x_cond.std(unbiased=False).detach(),
-            }
-        self._gate_stats.append(stats)
-
-    def pop_gate_stats(self):
-        if not self._gate_stats:
-            return None
-        aggregated = {}
-        for key in self._gate_stats[0]:
-            aggregated[key] = torch.stack([stats[key] for stats in self._gate_stats]).mean().detach()
-        self._gate_stats.clear()
-        return aggregated
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """
@@ -409,9 +409,6 @@ class DiTMFM(BaseModel):
             aggregated[key] = torch.stack([stats[key] for stats in self._weighting_stats]).mean().detach()
         self._weighting_stats.clear()
         return aggregated
-
-    def pop_gate_stats(self):
-        return self.dit.pop_gate_stats()
 
 
 #################################################################################

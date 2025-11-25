@@ -215,6 +215,11 @@ class DiTModule(nn.Module):
         t_cond: (N,)
         x_cond: (N, C, H, W)
         """
+        # Manually take all times to be 1-time to align with the SiT architecture
+        s = 1 - s
+        t = 1 - t
+        t_cond = 1 - t_cond
+
         x = self.x_embedder(x) + self.pos_embed            # (N, T, D), where T = H * W / patch_size ** 2
         x_cond = self.x_cond_embedder(x_cond) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2 DO we want additional embedding?
         dt = self.t_embedder(t-s)                # (N, D)

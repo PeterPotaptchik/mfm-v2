@@ -127,6 +127,7 @@ class ImageNetDataModule(pl.LightningDataModule):
         self.batch_size = cfg.trainer.batch_size
         self.num_workers = cfg.trainer.num_workers 
         self.resolution = cfg.dataset.img_resolution
+        print(f"DEBUG: ImageNetDataModule initialized with resolution: {self.resolution}")
         self.scaler = image_scaler
         self.inverse_scaler = inverse_image_scaler
         # Standard ImageNet normalization, equivalent to scaling
@@ -135,7 +136,8 @@ class ImageNetDataModule(pl.LightningDataModule):
                 transforms.Resize(self.resolution),
                 transforms.CenterCrop(self.resolution),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                # Scale to [-1, 1]
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ]
         )
         self.dims = (3, self.resolution, self.resolution)

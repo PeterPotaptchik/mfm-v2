@@ -14,12 +14,12 @@ optimizer: "Adam"
 loss:
   distillation_type: psd
   fm_loss_type: l2
-  fm_adaptive_loss_p: 2.0
-  fm_adaptive_loss_c: 0.5
+  fm_adaptive_loss_p: 1.0
+  fm_adaptive_loss_c: 0.001
   distillation_loss_type: l2
   distill_teacher_stop_grad: true
-  distill_adaptive_loss_p: 2.0
-  distill_adaptive_loss_c: 0.5
+  distill_adaptive_loss_p: 1.0
+  distill_adaptive_loss_c: 0.001
   explicit_v00_train: false
   distillation_weight: 1.0
   repa_weight: 0.4
@@ -48,7 +48,7 @@ trainer:
   log_every_n_steps: 25
   accumulate_grad_batches: 1
   precision: "bf16-mixed"
-  gradient_clip_val: 1.0
+  gradient_clip_val: 0.2
 
 sampling:
   every_n_steps: 10000

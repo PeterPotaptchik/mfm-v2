@@ -9,6 +9,7 @@ from lightning.pytorch.callbacks import Callback
 import torchvision
 import wandb
 import matplotlib.pyplot as plt
+from diffusers import AutoencoderKL
 
 from distcfm.utils.evaluation import posterior_sampling_fn, plot_posterior_samples
 from distcfm.utils.repa_utils import RepaModel
@@ -28,6 +29,18 @@ class TrainingModule(pl.LightningModule):
         # This prevents it from being part of state_dict, so we don't need to load/save it
         self._repa_model_container = [RepaModel(cfg)]
 
+        # Initialize VAE if using raw ImageNet images
+        self._vae_container = []
+        if cfg.dataset.name == "imagenet":
+            print("Initializing VAE for raw ImageNet training...")
+            vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
+            vae.eval()
+            for p in vae.parameters():
+                p.requires_grad = False
+            self._vae_container.append(vae)
+            self.register_buffer('latents_scale', torch.tensor([0.18215, 0.18215, 0.18215, 0.18215]).view(1, 4, 1, 1))
+            self.register_buffer('latents_bias', torch.tensor([0., 0., 0., 0.]).view(1, 4, 1, 1))
+
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
 
@@ -35,15 +48,29 @@ class TrainingModule(pl.LightningModule):
     def repa_model(self):
         return self._repa_model_container[0]
 
+    @property
+    def vae(self):
+        return self._vae_container[0] if self._vae_container else None
+
     def forward(self, x):
         return self.model(x)
 
     def setup(self, stage: str):
+        if self.vae:
+            self.vae.to(self.device)
         return
 
     def on_train_start(self):
         # Ensure repa_model is on the correct device
         self.repa_model.to(self.device)
+        if self.vae:
+            self.vae.to(self.device)
+
+    def on_validation_start(self):
+        # Ensure repa_model is on the correct device
+        self.repa_model.to(self.device)
+        if self.vae:
+            self.vae.to(self.device)
 
     def on_load_checkpoint(self, checkpoint):
         """
@@ -78,14 +105,32 @@ class TrainingModule(pl.LightningModule):
         except:
             x = batch      
             labels = None 
+        
+        if self.global_step == 0 and batch_idx == 0:
+            print(f"DEBUG: Input batch shape (raw images): {x.shape}")
+
         step = self.global_step
+
+        # Encode images if VAE is present
+        repa_input = None
+        if self.vae:
+            repa_input = x # Raw images for REPA
+            with torch.no_grad():
+                # x is [-1, 1]
+                # Cast x to the same dtype as VAE
+                # Disable autocast to ensure VAE runs in float32
+                with torch.cuda.amp.autocast(enabled=False):
+                    x_vae = x.to(dtype=self.vae.dtype)
+                    latents = self.vae.encode(x_vae).latent_dist.sample()
+                    latents = (latents - self.latents_bias) * self.latents_scale
+                    x = latents.to(dtype=x.dtype) # Cast back to original dtype (likely bf16)
 
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             prob = self.cfg.trainer.class_dropout_prob
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
-        losses, aux_losses = self.loss_fn(self.model, x, labels, step, repa_model=self.repa_model)
+        losses, aux_losses = self.loss_fn(self.model, x, labels, step, repa_model=self.repa_model, repa_input=repa_input)
         for name, loss in losses.items():
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         for name, loss in aux_losses.items():
@@ -137,6 +182,16 @@ class TrainingModule(pl.LightningModule):
             x = batch
             labels = None 
         
+        # Encode images if VAE is present
+        if self.vae:
+            with torch.no_grad():
+                # Disable autocast to ensure VAE runs in float32
+                with torch.cuda.amp.autocast(enabled=False):
+                    x_vae = x.to(dtype=self.vae.dtype)
+                    latents = self.vae.encode(x_vae).latent_dist.sample()
+                    latents = (latents - self.latents_bias) * self.latents_scale
+                    x = latents.to(dtype=x.dtype)
+
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             prob = self.cfg.trainer.class_dropout_prob
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
@@ -210,10 +265,11 @@ class SamplingCallback(Callback):
         self.test_data = test_data
         self.inverse_scaler = inverse_scaler
         self.SI = SI
+        # Use model input shape (latent shape) for sampling
         self.image_shape = (
-            self.cfg.dataset.img_channels, 
-            self.cfg.dataset.img_resolution, 
-            self.cfg.dataset.img_resolution
+            self.cfg.model.in_channels, 
+            self.cfg.model.input_size, 
+            self.cfg.model.input_size
         )
         # for generating x_t
         self.shared_noise = torch.randn(
@@ -224,6 +280,32 @@ class SamplingCallback(Callback):
         self.shared_posterior_noise = torch.randn(self.cfg.sampling.n_samples_per_image*self.cfg.sampling.n_conditioning_samples,
                                                   *self.image_shape)
         self._last_sampled_step = -1 
+
+    def _decode_if_needed(self, pl_module, samples):
+        if pl_module.vae:
+            # samples are scaled latents
+            latents = samples
+            
+            # Handle 5D input [B, N, C, H, W]
+            is_5d = latents.ndim == 5
+            if is_5d:
+                B, N, C, H, W = latents.shape
+                latents = latents.view(B * N, C, H, W)
+
+            latents = latents / pl_module.latents_scale + pl_module.latents_bias
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', enabled=False):
+                    latents = latents.to(dtype=pl_module.vae.dtype)
+                    images = pl_module.vae.decode(latents).sample
+            
+            if is_5d:
+                images = images.view(B, N, *images.shape[1:])
+
+            # images are [-1, 1]
+            return self.inverse_scaler(images) # [0, 1]
+        else:
+            # samples are images [-1, 1]
+            return self.inverse_scaler(samples) # [0, 1]
         
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if not trainer.is_global_zero:
@@ -233,21 +315,25 @@ class SamplingCallback(Callback):
             was_training = pl_module.training
             pl_module.eval()
             
+            # Use identity scaler for sampling, decode later
+            inverse_scaler_for_sampler = lambda x: x
+
             for n_steps in self.cfg.sampling.n_kernel_steps:
-                unconditional_samples_kernel = kernel_sampler_fn(
-                    pl_module.model,
-                    shape=self.image_shape,
-                    shape_decoded=(
-                        self.cfg.dataset.decoded_img_channels, 
-                        self.cfg.dataset.decoded_img_resolution, 
-                        self.cfg.dataset.decoded_img_resolution
-                    ),
-                    SI=self.SI,
-                    n_samples=self.cfg.sampling.n_unconditional_samples,
-                    n_batch_size=self.cfg.sampling.batch_size,
-                    n_steps=n_steps,
-                    inverse_scaler_fn=self.inverse_scaler
-                )
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    unconditional_samples_kernel = kernel_sampler_fn(
+                        pl_module.model,
+                        shape=self.image_shape,
+                        shape_decoded=self.image_shape, # Return latents if VAE
+                        SI=self.SI,
+                        n_samples=self.cfg.sampling.n_unconditional_samples,
+                        n_batch_size=self.cfg.sampling.batch_size,
+                        n_steps=n_steps,
+                        inverse_scaler_fn=inverse_scaler_for_sampler
+                    )
+                
+                # Decode and inverse scale
+                unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel)
+                
                 unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
                 self._save_samples_unconditional(
                     pl_module, unconditional_samples_kernel, 
@@ -256,10 +342,11 @@ class SamplingCallback(Callback):
                 del unconditional_samples_kernel
 
             for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
-                ode_x_t, ode_x_0 = self._sample_batch(
-                    pl_module, t_cond, self.cfg.ode_sampling_cfg
-                )
-                ode_x_t, ode_x_0 = ode_x_t.clamp(0.0, 1.0), ode_x_0.clamp(0.0, 1.0)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    ode_x_t, ode_x_0 = self._sample_batch(
+                        pl_module, t_cond, self.cfg.ode_sampling_cfg
+                    )
+                # Do not clamp here, clamp after decoding in _save_samples
                 self._save_samples(
                     pl_module, ode_x_t, ode_x_0, t_cond, 
                     "ode", steps=None
@@ -269,10 +356,11 @@ class SamplingCallback(Callback):
                 for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
                     sampling_cfg = self.cfg.consistency_sampling_cfg.copy()
                     sampling_cfg.consistency.steps = n_steps
-                    cons_x_t, cons_x_0 = self._sample_batch(
-                        pl_module, t_cond, sampling_cfg
-                    )
-                    cons_x_t, cons_x_0 = cons_x_t.clamp(0.0, 1.0), cons_x_0.clamp(0.0, 1.0)
+                    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                        cons_x_t, cons_x_0 = self._sample_batch(
+                            pl_module, t_cond, sampling_cfg
+                        )
+                    # Do not clamp here, clamp after decoding in _save_samples
                     self._save_samples(
                         pl_module, cons_x_t, cons_x_0, t_cond,
                         "consistency", steps=n_steps
@@ -287,11 +375,26 @@ class SamplingCallback(Callback):
         x_t_list, x_1_list = [], []
         bs = self.cfg.sampling.batch_size
         m = self.cfg.sampling.n_samples_per_image
+        
+        # Use identity scaler for sampling, decode later
+        inverse_scaler_for_sampler = lambda x: x
+
         for i in tqdm.tqdm(
             range(self.cfg.sampling.n_conditioning_samples // self.cfg.sampling.batch_size), 
             desc="Batches"
         ):
             x1_data = self.test_data[i*bs:(i+1)*bs].to(pl_module.device)
+            
+            # Encode if VAE
+            if pl_module.vae:
+                with torch.no_grad():
+                    with torch.amp.autocast('cuda', enabled=False):
+                        # Cast to VAE dtype
+                        x1_data = x1_data.to(dtype=pl_module.vae.dtype)
+                        latents = pl_module.vae.encode(x1_data).latent_dist.sample()
+                        latents = (latents - pl_module.latents_bias) * pl_module.latents_scale
+                        x1_data = latents.to(dtype=x1_data.dtype) # Cast back
+
             x0_data = self.shared_noise[i*bs:(i+1)*bs].to(pl_module.device)
             eps_start = self.shared_posterior_noise[i*(bs*m):(i+1)*(bs*m)].to(pl_module.device)
             t_cond_tensor = torch.full((bs,), t_cond, device=pl_module.device)
@@ -308,7 +411,7 @@ class SamplingCallback(Callback):
                     xt_data,
                     t_cond_tensor,
                     n_samples_per_image=m,
-                    inverse_scaler=self.inverse_scaler,
+                    inverse_scaler=inverse_scaler_for_sampler,
                     eps_start=eps_start,
                 )
             x_t_list.append(xt)
@@ -319,6 +422,14 @@ class SamplingCallback(Callback):
     def _save_samples(self, pl_module, x_t, x_0, t_cond, sample_type, steps=None):
         save_dir = os.path.join(self.cfg.work_dir, f"samples_{pl_module.global_step}_ema")
         os.makedirs(save_dir, exist_ok=True)
+
+        # Decode if needed
+        x_t = self._decode_if_needed(pl_module, x_t)
+        x_0 = self._decode_if_needed(pl_module, x_0)
+
+        # Clamp to [0, 1]
+        x_t = x_t.clamp(0.0, 1.0)
+        x_0 = x_0.clamp(0.0, 1.0)
 
         # Generate file name
         steps_str = f"_steps_{steps}" if steps is not None else ""
