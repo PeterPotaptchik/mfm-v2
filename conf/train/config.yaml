@@ -23,6 +23,12 @@ loss:
   explicit_v00_train: false
   distillation_weight: 1.0
 
+weighting_model:
+  _target_: distcfm.models.base_model.LossWeightingNetwork
+  channels: 128
+  clamp_min: -10.0
+  clamp_max: 10.0
+
 lr:
   val: 0.0003
   scheduler: constant 

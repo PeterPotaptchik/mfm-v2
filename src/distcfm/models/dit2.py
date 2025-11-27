@@ -346,23 +346,12 @@ class DiT(nn.Module):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
-
 class DiTMFM(BaseModel):
     def __init__(self, learn_loss_weighting, channels=128, z_dim=None, projector_dim=2048, encoder_depth=8, **dit_kwargs):
         super().__init__()
         self.dit = DiT(z_dim=z_dim, projector_dim=projector_dim, encoder_depth=encoder_depth, **dit_kwargs)
-        self.learn_loss_weighting = learn_loss_weighting
-        self._weighting_stats = []
         self.frozen = False
 
-        if learn_loss_weighting:
-            self.linear = MPConv(channels, 1, kernel=[])
-            self.linear_off_diag = MPConv(channels, 1, kernel=[])
-            self.emb_fourier = MPFourier(channels)
-            self.emb_noise_t = MPConv(channels, channels, kernel=[])
-            self.emb_noise_s = MPConv(channels, channels, kernel=[])
-            self.emb_noise_t_cond = MPConv(channels, channels, kernel=[])
-    
     def freeze_dit(self):
         for param in self.dit.parameters():
             param.requires_grad = False
@@ -373,69 +362,12 @@ class DiTMFM(BaseModel):
             param.requires_grad = True
             self.frozen = False
 
-    def v(self, s, t, x, t_cond, x_cond, class_labels=None, return_weighting=False, return_projections=False):
+    def v(self, s, t, x, t_cond, x_cond, class_labels=None):
         if class_labels is None:
             class_labels = torch.full((x.shape[0],), self.dit.label_dim, dtype=torch.long, device=x.device)
       
-        ret = self.dit(s, t, x, t_cond, x_cond, class_labels, return_projections=return_projections)
-        
-        if return_projections:
-            v, z_tilde = ret
-        else:
-            v = ret
-
-        if return_weighting:
-            weighting = self._compute_weighting(s, t, t_cond)
-            if self.training:
-                is_diag = torch.eq(s, t).float()
-                diagonal_weighting = is_diag * weighting.squeeze()
-                off_diagonal_weighting = (1.0 - is_diag) * weighting.squeeze()
-
-                self._record_weighting_stats(diagonal_weighting, off_diagonal_weighting)
-            if return_projections:
-                return v, weighting, z_tilde
-            return v, weighting
-
-        if return_projections:
-            return v, z_tilde
+        v = self.dit(s, t, x, t_cond, x_cond, class_labels)
         return v
-
-    def _compute_weighting(self, s, t, t_cond):
-        if not self.learn_loss_weighting:
-            raise RuntimeError("Loss weighting requested but learn_loss_weighting=False")
-        s_emb = self.emb_noise_s(self.emb_fourier(s))
-        t_emb = self.emb_noise_t(self.emb_fourier(t))
-        t_cond_emb = self.emb_noise_t_cond(self.emb_fourier(t_cond))
-        combined = (s_emb + t_emb + t_cond_emb) / math.sqrt(3.0)
-
-        diag = self.linear(combined)
-        off_diag = self.linear_off_diag(combined)
-
-        is_diag = torch.eq(s, t).float()[:, None]
-        weighting = is_diag * diag + (1.0 - is_diag) * off_diag
-
-        return weighting.reshape(-1, 1, 1, 1)
-
-    def _record_weighting_stats(self, diagonal_weighting, off_diagonal_weighting):
-        with torch.no_grad():
-            stats = {
-                "diag_weighting_mean": diagonal_weighting.mean().detach(),
-                "diag_weighting_std": diagonal_weighting.std(unbiased=False).detach(),
-                "diag_var_mean": diagonal_weighting.exp().mean().detach(),
-                "off_diag_weighting_mean": off_diagonal_weighting.mean().detach(),
-                "off_diag_weighting_std": off_diagonal_weighting.std(unbiased=False).detach(),
-                "off_diag_var_mean": off_diagonal_weighting.exp().mean().detach(),
-            }
-        self._weighting_stats.append(stats)
-
-    def pop_weighting_stats(self):
-        if not self._weighting_stats:
-            return None
-        aggregated = {}
-        for key in self._weighting_stats[0]:
-            aggregated[key] = torch.stack([stats[key] for stats in self._weighting_stats]).mean().detach()
-        self._weighting_stats.clear()
-        return aggregated
 
 
 #################################################################################

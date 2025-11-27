@@ -24,7 +24,8 @@ dependencies = [
   "clean-fid",
   "timm",
   "torchmetrics",
-  "transformers"
+  "transformers",
+  "image-reward"
 ]
 
 [build-system]

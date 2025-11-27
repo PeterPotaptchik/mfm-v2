@@ -10,6 +10,7 @@ import torchvision
 import wandb
 import matplotlib.pyplot as plt
 from diffusers import AutoencoderKL
+from distcfm.utils import EMAWeightAveraging
 
 from distcfm.utils.evaluation import posterior_sampling_fn, plot_posterior_samples
 from distcfm.utils.repa_utils import RepaModel
@@ -18,9 +19,10 @@ def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
 class TrainingModule(pl.LightningModule):
-    def __init__(self, cfg, model, loss_fn, SI):
+    def __init__(self, cfg, model, weighting_model, loss_fn, SI):
         super().__init__()
         self.model = model
+        self.weighting_model = weighting_model
         self.loss_fn = loss_fn
         self.cfg = cfg
         self.SI = SI
@@ -98,7 +100,14 @@ class TrainingModule(pl.LightningModule):
             print(f"Loading checkpoint with missing REPA projection head")
             print(f"  proj_head will be randomly initialized")
             print(f"{'='*60}\n")
-
+    
+    def _get_ema_callback(self):
+        for cb in self.trainer.callbacks:
+            if isinstance(cb, EMAWeightAveraging):
+                return cb
+        self._ema_callback = None
+        return None
+    
     def training_step(self, batch, batch_idx):
         try:
             x, labels = batch
@@ -111,26 +120,27 @@ class TrainingModule(pl.LightningModule):
 
         step = self.global_step
 
-        # Encode images if VAE is present
-        repa_input = None
-        if self.vae:
-            repa_input = x # Raw images for REPA
-            with torch.no_grad():
-                # x is [-1, 1]
-                # Cast x to the same dtype as VAE
-                # Disable autocast to ensure VAE runs in float32
-                with torch.cuda.amp.autocast(enabled=False):
-                    x_vae = x.to(dtype=self.vae.dtype)
-                    latents = self.vae.encode(x_vae).latent_dist.sample()
-                    latents = (latents - self.latents_bias) * self.latents_scale
-                    x = latents.to(dtype=x.dtype) # Cast back to original dtype (likely bf16)
+        # # Encode images if VAE is present
+        # repa_input = None
+        # if self.vae:
+        #     repa_input = x # Raw images for REPA
+        #     with torch.no_grad():
+        #         # x is [-1, 1]
+        #         # Cast x to the same dtype as VAE
+        #         # Disable autocast to ensure VAE runs in float32
+        #         with torch.cuda.amp.autocast(enabled=False):
+        #             x_vae = x.to(dtype=self.vae.dtype)
+        #             latents = self.vae.encode(x_vae).latent_dist.sample()
+        #             latents = (latents - self.latents_bias) * self.latents_scale
+        #             x = latents.to(dtype=x.dtype) # Cast back to original dtype (likely bf16)
 
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             prob = self.cfg.trainer.class_dropout_prob
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
-        losses, aux_losses = self.loss_fn(self.model, x, labels, step, repa_model=self.repa_model, repa_input=repa_input)
+        losses, aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, step, 
+                                          ema_state=self._get_ema_callback())
         for name, loss in losses.items():
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         for name, loss in aux_losses.items():
@@ -158,7 +168,7 @@ class TrainingModule(pl.LightningModule):
                 for name, value in gate_stats.items():
                     self.log(f"train/{name}", value, on_step=True, on_epoch=False, prog_bar=False, logger=True)
 
-        weighting_stats_fn = getattr(self.model, "pop_weighting_stats", None)
+        weighting_stats_fn = getattr(self.weighting_model, "pop_weighting_stats", None)
         if callable(weighting_stats_fn):
             weighting_stats = weighting_stats_fn()
             if weighting_stats is not None:
@@ -197,7 +207,8 @@ class TrainingModule(pl.LightningModule):
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
-        ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, x, labels, self.global_step)
+        ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, self.global_step, 
+                                                        ema_state=self._get_ema_callback())
         for name, loss in ema_val_loss.items():
             self.log(f"val_ema/{name}", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         for name, loss in ema_val_aux_losses.items():
@@ -215,8 +226,6 @@ class TrainingModule(pl.LightningModule):
         else:
             optimizer = torch.optim.Adam(params, lr=self.cfg.lr.val, weight_decay=self.cfg.get("weight_decay", 0.0))
 
-
-        
         if self.cfg.lr.scheduler == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, 

@@ -60,6 +60,7 @@ def main(cfg: DictConfig):
         model = torch.compile(model)
     SI = instantiate(cfg.SI)
     model = SIModelWrapper(model, SI, cfg.use_parametrization)
+    weighting_model = instantiate(cfg.weighting_model) if cfg.model.learn_loss_weighting else None
 
     datamodule = get_data_module(cfg)
     datamodule.prepare_data()
@@ -99,7 +100,7 @@ def main(cfg: DictConfig):
     inverse_scaler = datamodule.inverse_scaler
 
     loss_fn = get_consistency_loss_fn(cfg, SI)
-    train_module = TrainingModule(cfg, model, loss_fn, SI)
+    train_module = TrainingModule(cfg, model, weighting_model, loss_fn, SI)
 
     if cfg.get("init_from_sit"):
         # sit_ckpt_path = download_sit_checkpoint()
