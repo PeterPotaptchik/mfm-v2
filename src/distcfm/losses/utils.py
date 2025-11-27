@@ -14,7 +14,7 @@ def l2_loss(pred, target, weighting, stop_gradient=False,):
     weighted_delta_sq = (1/weighting.exp())*delta_sq + weighting
     return torch.mean(weighted_delta_sq), torch.mean(delta_sq)
 
-def log_lv_loss(pred, target, weighting, stop_gradient=False, eps=0.01):
+def log_lv_loss(pred, target, weighting, stop_gradient=False):
     """Computes the mean squared L2 loss."""
     if stop_gradient:
         actual_target = torch.detach(target)
@@ -22,12 +22,11 @@ def log_lv_loss(pred, target, weighting, stop_gradient=False, eps=0.01):
         actual_target = target
     delta = pred - actual_target
     err = (delta)**2
-    mse_loss = torch.sum(err, dim=list(range(1, len(pred.shape))))
     mean_loss = torch.mean(err, dim=list(range(1, len(pred.shape))))
     # Reshape mean_loss to match weighting for broadcasting: (B,) -> (B, 1, 1, 1)
     mean_loss = broadcast_to_shape(mean_loss, weighting.shape)
-    log_loss = torch.log((1 / weighting.exp()) * mean_loss + eps) + weighting
-    return torch.mean(log_loss), torch.mean(mse_loss)
+    log_loss = torch.log((1 / weighting.exp()) * mean_loss + 1.0) + 0.5 * weighting
+    return torch.mean(log_loss), torch.mean(mean_loss)
 
 def adaptive_loss(pred, target, weighting, p, c, stop_gradient=False):
     """Computes the adaptively weighted squared L2 loss.

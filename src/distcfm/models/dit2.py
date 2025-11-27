@@ -353,13 +353,25 @@ class DiTMFM(BaseModel):
         self.dit = DiT(z_dim=z_dim, projector_dim=projector_dim, encoder_depth=encoder_depth, **dit_kwargs)
         self.learn_loss_weighting = learn_loss_weighting
         self._weighting_stats = []
+        self.frozen = False
 
         if learn_loss_weighting:
             self.linear = MPConv(channels, 1, kernel=[])
+            self.linear_off_diag = MPConv(channels, 1, kernel=[])
             self.emb_fourier = MPFourier(channels)
             self.emb_noise_t = MPConv(channels, channels, kernel=[])
             self.emb_noise_s = MPConv(channels, channels, kernel=[])
             self.emb_noise_t_cond = MPConv(channels, channels, kernel=[])
+    
+    def freeze_dit(self):
+        for param in self.dit.parameters():
+            param.requires_grad = False
+            self.frozen = True
+    
+    def unfreeze_dit(self):
+        for param in self.dit.parameters():
+            param.requires_grad = True
+            self.frozen = False
 
     def v(self, s, t, x, t_cond, x_cond, class_labels=None, return_weighting=False, return_projections=False):
         if class_labels is None:
@@ -375,7 +387,11 @@ class DiTMFM(BaseModel):
         if return_weighting:
             weighting = self._compute_weighting(s, t, t_cond)
             if self.training:
-                self._record_weighting_stats(weighting)
+                is_diag = torch.eq(s, t).float()
+                diagonal_weighting = is_diag * weighting.squeeze()
+                off_diagonal_weighting = (1.0 - is_diag) * weighting.squeeze()
+
+                self._record_weighting_stats(diagonal_weighting, off_diagonal_weighting)
             if return_projections:
                 return v, weighting, z_tilde
             return v, weighting
@@ -391,13 +407,24 @@ class DiTMFM(BaseModel):
         t_emb = self.emb_noise_t(self.emb_fourier(t))
         t_cond_emb = self.emb_noise_t_cond(self.emb_fourier(t_cond))
         combined = (s_emb + t_emb + t_cond_emb) / math.sqrt(3.0)
-        return self.linear(combined).reshape(-1, 1, 1, 1)
 
-    def _record_weighting_stats(self, weighting):
+        diag = self.linear(combined)
+        off_diag = self.linear_off_diag(combined)
+
+        is_diag = torch.eq(s, t).float()[:, None]
+        weighting = is_diag * diag + (1.0 - is_diag) * off_diag
+
+        return weighting.reshape(-1, 1, 1, 1)
+
+    def _record_weighting_stats(self, diagonal_weighting, off_diagonal_weighting):
         with torch.no_grad():
             stats = {
-                "weighting_mean": weighting.mean().detach(),
-                "weighting_std": weighting.std(unbiased=False).detach(),
+                "diag_weighting_mean": diagonal_weighting.mean().detach(),
+                "diag_weighting_std": diagonal_weighting.std(unbiased=False).detach(),
+                "diag_var_mean": diagonal_weighting.exp().mean().detach(),
+                "off_diag_weighting_mean": off_diagonal_weighting.mean().detach(),
+                "off_diag_weighting_std": off_diagonal_weighting.std(unbiased=False).detach(),
+                "off_diag_var_mean": off_diagonal_weighting.exp().mean().detach(),
             }
         self._weighting_stats.append(stats)
 

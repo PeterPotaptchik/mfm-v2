@@ -15,6 +15,7 @@ def sample_t_cond(N, step, cfg):
         return torch.rand(N) ** cfg.trainer.t_cond_power * t_max * torch.bernoulli(probs)
     
 def sample_s_u(N, step, cfg):
+    # step += 20000
     n_warmup_steps = cfg.trainer.num_warmup_steps
     anneal_end_step = cfg.trainer.anneal_end_step
     
@@ -54,6 +55,11 @@ def broadcast_to_shape(tensor, shape):
 
 def get_consistency_loss_fn(cfg, SI):
     def loss_fn(model, x1, labels, step, repa_model=None, repa_input=None):
+        # if step < cfg.trainer.learn_loss_weighting_only and not model.model.frozen:
+        #     model.model.freeze_dit()
+        # if step == cfg.trainer.learn_loss_weighting_only:
+        #     model.model.unfreeze_dit()
+
         # --- 1. Generate Conditioning Variables ---
         device = x1.device
         N = x1.shape[0]  # batch size
@@ -108,10 +114,11 @@ def get_consistency_loss_fn(cfg, SI):
         # --- REPA Projection Loss ---
         repa_loss = torch.tensor(0.0, device=device)
         if repa_model is not None and z_tilde is not None:
-            with torch.no_grad():
-                # Use repa_input if provided, otherwise x1
-                repa_in = repa_input if repa_input is not None else x1
-                z = repa_model(repa_in)
+            # with torch.no_grad():
+            #     # Use repa_input if provided, otherwise x1
+            #     repa_in = repa_input if repa_input is not None else x1
+            #     z = repa_model(repa_in)
+            z = z_tilde.detach()
 
             z_norm = torch.nn.functional.normalize(z, dim=-1)
             z_tilde_norm = torch.nn.functional.normalize(z_tilde, dim=-1)
@@ -123,7 +130,7 @@ def get_consistency_loss_fn(cfg, SI):
         # --- 3. Distillation Loss (on the off-diagonal s<u) ---
         if step > cfg.trainer.num_warmup_steps:
             x0 = torch.randn_like(x1)
-            x0, x1 = x0.to(device), x1.to(device)
+            # x0, x1 = x0.to(device), x1.to(device)
 
             expanded_s = broadcast_to_shape(s, x1.shape)
             Is = (1 - expanded_s) * x0 + expanded_s * x1

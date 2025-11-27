@@ -3,7 +3,7 @@
 #SBATCH --job-name=imagenet
 #SBATCH --account=kempner_albergo_lab
 #SBATCH --partition=kempner_h100
-#SBATCH --nodes=16
+#SBATCH --nodes=12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=22
@@ -54,7 +54,7 @@ echo "GPUS_PER_NODE=${GPUS_PER_NODE}"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/01-35-32/checkpoints/periodic-epoch=06-step=120000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/18-34-27/checkpoints/periodic-epoch=01-step=20000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-22/12-14-22/checkpoints/periodic-epoch=00-step=5000.ckpt"
-export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-25/03-10-50/checkpoints/periodic-epoch=07-step=40000.ckpt"
+export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-26/10-17-36/checkpoints/periodic-epoch=09-step=25000.ckpt"
 
 
 # python REPA/generate.py \
@@ -96,32 +96,32 @@ srun bash -c '
     dataset=imagenet_1k \
     ++model.input_size=32 \
     ++model.in_channels=4 \
-    ++model.label_dim=2000 \
+    ++model.label_dim=1000 \
     ++trainer.devices="$GPUS_PER_NODE" \
     ++trainer.num_nodes="$NNODES" \
     ++lr.val=0.0001 \
     ++lr.scheduler=constant \
-    ++lr.warmup_steps=1000 \
-    ++trainer.num_warmup_steps=0 \
+    ++lr.warmup_steps=5000 \
+    ++trainer.num_warmup_steps=10000 \
     ++trainer.num_train_steps=500000 \
     ++trainer.batch_size=32 \
     ++trainer.num_workers=20 \
     ++trainer.class_dropout_prob=0.5 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
     ++loss.explicit_v00_train=false \
-    ++trainer.anneal_end_step=0 \
-    ++loss.distillation_type=psd \
+    ++trainer.anneal_end_step=100000 \
+    ++loss.distillation_type=mf \
     ++trainer.accumulate_grad_batches=1 \
     ++compile=false \
     ++optimizer=RAdam \
     ++trainer.ema.decay=0.9995 \
     ++trainer.t_cond_warmup_steps=0 \
-    ++trainer.t_cond_0_rate=0.1 \
+    ++trainer.t_cond_0_rate=0.05 \
     ++trainer.t_cond_power=1.25 \
     ++sampling.every_n_steps=5000 \
     ++use_parametrization=False \
     ++trainer.checkpoint_every_n_steps=5000 \
-    ++loss.repa_weight=0.2 \
+    ++loss.repa_weight=0.0 \
     ++weight_decay=0.00 \
     "resume_from_checkpoint=\"${MODEL_CHECKPOINT}\"" \
   '

@@ -16,7 +16,7 @@ loss:
   fm_loss_type: l2
   fm_adaptive_loss_p: 1.0
   fm_adaptive_loss_c: 0.001
-  distillation_loss_type: l2
+  distillation_loss_type: lv
   distill_teacher_stop_grad: true
   distill_adaptive_loss_p: 1.0
   distill_adaptive_loss_c: 0.001
