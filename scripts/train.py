@@ -22,7 +22,7 @@ from distcfm.utils import EMAWeightAveraging, SamplingCallback, TrainingModule
 from distcfm.utils.evaluation import get_conditioning_data
 from torchvision.datasets.utils import download_url
 import torch.nn as nn
-
+from lightning import seed_everything
 
 def download_sit_checkpoint(model_name='last.pt'):
     local_path = f'pretrained_models/{model_name}'
@@ -50,6 +50,7 @@ def main(cfg: DictConfig):
         hydra.core.hydra_config.HydraConfig.get().runtime.output_dir,
     )
     cfg.work_dir = log_dir
+    seed_everything(cfg.seed, workers=True)
 
     model = instantiate(cfg.model)
     if cfg.compile:
