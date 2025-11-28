@@ -1,6 +1,6 @@
 _target_: distcfm.models.DiTMFM
 # TODO: Need to add these in
-learn_loss_weighting: true
+learn_loss_weighting: false
 # weight_on_t_cond: true
 
 # === tokenization ===

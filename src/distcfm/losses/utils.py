@@ -39,7 +39,7 @@ def adaptive_loss(pred, target, weighting, p, c, stop_gradient=False):
 
     delta_sq = (pred - actual_target)**2
     # norm based weighting
-    delta_sq_norm = torch.mean(delta_sq, dim=tuple(range(1, len(delta_sq.shape))))
+    delta_sq_norm = torch.sum(delta_sq, dim=tuple(range(1, len(delta_sq.shape))))
     weight = 1.0 / (delta_sq_norm + c) ** p
     weight = torch.detach(weight)  
     weight = broadcast_to_shape(weight, delta_sq.shape)

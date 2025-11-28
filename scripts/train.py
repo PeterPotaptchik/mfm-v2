@@ -20,7 +20,6 @@ from distcfm.losses import get_consistency_loss_fn
 from distcfm.models.model_wrapper import SIModelWrapper
 from distcfm.utils import EMAWeightAveraging, SamplingCallback, TrainingModule
 from distcfm.utils.evaluation import get_conditioning_data
-from distcfm.utils.repa_utils import get_repa_z_dims
 from torchvision.datasets.utils import download_url
 import torch.nn as nn
 
@@ -51,9 +50,6 @@ def main(cfg: DictConfig):
         hydra.core.hydra_config.HydraConfig.get().runtime.output_dir,
     )
     cfg.work_dir = log_dir
-
-    z_dim = get_repa_z_dims()
-    cfg.model.z_dim = z_dim
 
     model = instantiate(cfg.model)
     if cfg.compile:

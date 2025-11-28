@@ -2,8 +2,42 @@ import torch.nn as nn
 import torch
 from abc import ABC, abstractmethod
 import math
-from distcfm.models.edm2 import MPConv, MPFourier
 import itertools
+
+
+class MPConv(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel):
+        super().__init__()
+        self.out_channels = out_channels
+        self.weight = torch.nn.Parameter(torch.randn(out_channels, in_channels, *kernel))
+
+    def forward(self, x, gain=1,):
+        w = self.weight.to(torch.float32)
+        # if self.training:
+            # with torch.no_grad():
+            #     self.weight.copy_(normalize(w)) # forced weight normalization
+        w = normalize(w) # traditional weight normalization
+        w = w * (gain / np.sqrt(w[0].numel())) # magnitude-preserving scaling
+        w = w.to(x.dtype)
+        if w.ndim == 2:
+            return x @ w.t()
+        assert w.ndim == 4
+        return torch.nn.functional.conv2d(x, w, padding=(w.shape[-1]//2,))
+
+
+class MPFourier(torch.nn.Module):
+    def __init__(self, num_channels, bandwidth=1):
+        super().__init__()
+        self.register_buffer('freqs', 2 * np.pi * torch.randn(num_channels) * bandwidth)
+        self.register_buffer('phases', 2 * np.pi * torch.rand(num_channels))
+
+    def forward(self, x):
+        y = x.to(torch.float32)
+        y = y.ger(self.freqs.to(torch.float32))
+        y = y + self.phases.to(torch.float32)
+        y = y.cos() * np.sqrt(2)
+        return y.to(x.dtype)
+
 
 def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
@@ -84,9 +118,13 @@ class LossWeightingNetwork(nn.Module):
                 "diag_weighting_mean": diagonal_weighting.mean().detach(),
                 "diag_weighting_std": diagonal_weighting.std(unbiased=False).detach(),
                 "diag_var_mean": diagonal_weighting.exp().mean().detach(),
+                "diag_var_min": diagonal_weighting.exp().min().detach(),
+                "diag_var_max": diagonal_weighting.exp().max().detach(),
                 "off_diag_weighting_mean": off_diagonal_weighting.mean().detach(),
                 "off_diag_weighting_std": off_diagonal_weighting.std(unbiased=False).detach(),
                 "off_diag_var_mean": off_diagonal_weighting.exp().mean().detach(),
+                "off_diag_var_min": off_diagonal_weighting.exp().min().detach(),
+                "off_diag_var_max": off_diagonal_weighting.exp().max().detach(),
             }
         self._weighting_stats.append(stats)
 

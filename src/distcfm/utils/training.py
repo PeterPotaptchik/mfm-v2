@@ -2,6 +2,8 @@ import os
 import math
 import gc
 import tqdm 
+import copy
+
 
 import torch
 import lightning as pl
@@ -10,10 +12,18 @@ import torchvision
 import wandb
 import matplotlib.pyplot as plt
 from diffusers import AutoencoderKL
-from distcfm.utils import EMAWeightAveraging
 
 from distcfm.utils.evaluation import posterior_sampling_fn, plot_posterior_samples
-from distcfm.utils.repa_utils import RepaModel
+
+from lightning.pytorch.callbacks import WeightAveraging
+from torch.optim.swa_utils import get_ema_avg_fn
+
+class EMAWeightAveraging(WeightAveraging):
+    def __init__(self, decay=0.999):
+        super().__init__(avg_fn=get_ema_avg_fn(decay=decay))
+
+    def should_update(self, step_idx=None, epoch_idx=None):
+        return (step_idx is not None) and (step_idx >= 100)
 
 def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
@@ -22,14 +32,18 @@ class TrainingModule(pl.LightningModule):
     def __init__(self, cfg, model, weighting_model, loss_fn, SI):
         super().__init__()
         self.model = model
+        self._teacher_container = []
+        if cfg.loss.distill_fm:
+            teacher_model = copy.deepcopy(self.model)
+            teacher_model.eval()
+            for p in teacher_model.parameters():
+                p.requires_grad = False
+            self._teacher_container.append(teacher_model)
+
         self.weighting_model = weighting_model
         self.loss_fn = loss_fn
         self.cfg = cfg
         self.SI = SI
-        
-        # Use a list to avoid registering repa_model as a submodule
-        # This prevents it from being part of state_dict, so we don't need to load/save it
-        self._repa_model_container = [RepaModel(cfg)]
 
         # Initialize VAE if using raw ImageNet images
         self._vae_container = []
@@ -47,12 +61,12 @@ class TrainingModule(pl.LightningModule):
             self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
 
     @property
-    def repa_model(self):
-        return self._repa_model_container[0]
-
-    @property
     def vae(self):
         return self._vae_container[0] if self._vae_container else None
+    
+    @property
+    def teacher_model(self):
+        return self._teacher_container[0] if self._teacher_container else None
 
     def forward(self, x):
         return self.model(x)
@@ -60,19 +74,25 @@ class TrainingModule(pl.LightningModule):
     def setup(self, stage: str):
         if self.vae:
             self.vae.to(self.device)
-        return
+        if self.teacher_model:
+            self.teacher_model.to(self.device)
+
+    def on_after_backward(self):
+        for name, param in self.named_parameters():
+            if param.grad is None:
+                print(f"Unused parameter: {name}")
 
     def on_train_start(self):
-        # Ensure repa_model is on the correct device
-        self.repa_model.to(self.device)
         if self.vae:
             self.vae.to(self.device)
+        if self.teacher_model:
+            self.teacher_model.to(self.device)
 
     def on_validation_start(self):
-        # Ensure repa_model is on the correct device
-        self.repa_model.to(self.device)
         if self.vae:
             self.vae.to(self.device)
+        if self.teacher_model:
+            self.teacher_model.to(self.device)
 
     def on_load_checkpoint(self, checkpoint):
         """
@@ -92,14 +112,7 @@ class TrainingModule(pl.LightningModule):
         model_keys = set(self.state_dict().keys())
         ckpt_keys = set(state_dict.keys())
         missing_keys = model_keys - ckpt_keys
-        
-        proj_head_missing = any("proj_head" in k for k in missing_keys)
-        
-        if proj_head_missing:
-            print(f"\n{'='*60}")
-            print(f"Loading checkpoint with missing REPA projection head")
-            print(f"  proj_head will be randomly initialized")
-            print(f"{'='*60}\n")
+
     
     def _get_ema_callback(self):
         for cb in self.trainer.callbacks:
@@ -120,19 +133,13 @@ class TrainingModule(pl.LightningModule):
 
         step = self.global_step
 
-        # # Encode images if VAE is present
-        # repa_input = None
-        # if self.vae:
-        #     repa_input = x # Raw images for REPA
-        #     with torch.no_grad():
-        #         # x is [-1, 1]
-        #         # Cast x to the same dtype as VAE
-        #         # Disable autocast to ensure VAE runs in float32
-        #         with torch.cuda.amp.autocast(enabled=False):
-        #             x_vae = x.to(dtype=self.vae.dtype)
-        #             latents = self.vae.encode(x_vae).latent_dist.sample()
-        #             latents = (latents - self.latents_bias) * self.latents_scale
-        #             x = latents.to(dtype=x.dtype) # Cast back to original dtype (likely bf16)
+        if self.vae:
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', enabled=False):
+                    x_vae = x.to(dtype=self.vae.dtype)
+                    latents = self.vae.encode(x_vae).latent_dist.sample()
+                    latents = (latents - self.latents_bias) * self.latents_scale
+                    x = latents.to(dtype=x.dtype) # Cast back to original dtype (likely bf16)
 
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             prob = self.cfg.trainer.class_dropout_prob
@@ -140,7 +147,7 @@ class TrainingModule(pl.LightningModule):
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
         losses, aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, step, 
-                                          ema_state=self._get_ema_callback())
+                                          ema_state=self._get_ema_callback(), teacher_model=self.teacher_model)
         for name, loss in losses.items():
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         for name, loss in aux_losses.items():
@@ -151,8 +158,6 @@ class TrainingModule(pl.LightningModule):
         for name, loss in losses.items():
             if name == "distillation_loss":
                 total_loss += loss * self.cfg.loss.distillation_weight
-            elif name == "repa_loss":
-                total_loss += loss * self.cfg.loss.repa_weight
             else:
                 total_loss += loss
 
@@ -196,7 +201,7 @@ class TrainingModule(pl.LightningModule):
         if self.vae:
             with torch.no_grad():
                 # Disable autocast to ensure VAE runs in float32
-                with torch.cuda.amp.autocast(enabled=False):
+                with torch.amp.autocast('cuda', enabled=False):
                     x_vae = x.to(dtype=self.vae.dtype)
                     latents = self.vae.encode(x_vae).latent_dist.sample()
                     latents = (latents - self.latents_bias) * self.latents_scale
@@ -208,7 +213,7 @@ class TrainingModule(pl.LightningModule):
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
         ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, self.global_step, 
-                                                        ema_state=self._get_ema_callback())
+                                                        ema_state=self._get_ema_callback(), teacher_model=self.teacher_model)
         for name, loss in ema_val_loss.items():
             self.log(f"val_ema/{name}", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         for name, loss in ema_val_aux_losses.items():

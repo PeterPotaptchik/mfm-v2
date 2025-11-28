@@ -101,8 +101,8 @@ srun bash -c '
     ++trainer.num_nodes="$NNODES" \
     ++lr.val=0.0001 \
     ++lr.scheduler=constant \
-    ++lr.warmup_steps=5000 \
-    ++trainer.num_warmup_steps=10000 \
+    ++lr.warmup_steps=2000 \
+    ++trainer.num_warmup_steps=20000 \
     ++trainer.num_train_steps=500000 \
     ++trainer.batch_size=32 \
     ++trainer.num_workers=20 \
@@ -121,9 +121,8 @@ srun bash -c '
     ++sampling.every_n_steps=5000 \
     ++use_parametrization=False \
     ++trainer.checkpoint_every_n_steps=5000 \
-    ++loss.repa_weight=0.0 \
     ++weight_decay=0.00 \
-    "resume_from_checkpoint=\"${MODEL_CHECKPOINT}\"" \
+    +init_from_sit=True
   '
     # "resume_from_checkpoint=\"$MODEL_CHECKPOINT\""
 

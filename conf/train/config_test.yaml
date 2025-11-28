@@ -13,16 +13,22 @@ optimizer: "Adam"
 
 loss:
   distillation_type: psd
-  fm_loss_type: l2
+  fm_loss_type: adaptive
   fm_adaptive_loss_p: 1.0
-  fm_adaptive_loss_c: 0.001
-  distillation_loss_type: lv
+  fm_adaptive_loss_c: 0.01
+  distillation_loss_type: adaptive
   distill_teacher_stop_grad: true
   distill_adaptive_loss_p: 1.0
-  distill_adaptive_loss_c: 0.001
+  distill_adaptive_loss_c: 0.01
   explicit_v00_train: false
   distillation_weight: 1.0
-  repa_weight: 0.4
+  distill_fm: true
+
+weighting_model:
+  _target_: distcfm.models.base_model.LossWeightingNetwork
+  channels: 128
+  clamp_min: -10.0
+  clamp_max: 10.0
 
 
 lr:
@@ -48,7 +54,7 @@ trainer:
   log_every_n_steps: 25
   accumulate_grad_batches: 1
   precision: "bf16-mixed"
-  gradient_clip_val: 0.2
+  gradient_clip_val: 0.1
 
 sampling:
   every_n_steps: 10000

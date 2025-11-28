@@ -22,16 +22,6 @@ from distcfm.models.base_model import BaseModel
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
-def build_mlp(hidden_size, projector_dim, z_dim):
-    return nn.Sequential(
-                nn.Linear(hidden_size, projector_dim),
-                nn.SiLU(),
-                nn.Linear(projector_dim, projector_dim),
-                nn.SiLU(),
-                nn.Linear(projector_dim, z_dim),
-            )
-
-
 
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
@@ -172,8 +162,6 @@ class DiT(nn.Module):
         class_dropout_prob=0.0,
         label_dim=1000,
         learn_sigma=False,
-        z_dim=None,
-        projector_dim=2048,
         encoder_depth=8,
         qk_norm=False,
     ):
@@ -209,10 +197,7 @@ class DiT(nn.Module):
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        
-        self.z_dim = z_dim
-        if z_dim is not None:
-            self.proj_head = build_mlp(hidden_size, projector_dim, z_dim)
+    
 
         self.initialize_weights()
 
@@ -261,13 +246,6 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
-        
-        if self.z_dim is not None:
-            for m in self.proj_head.modules():
-                if isinstance(m, nn.Linear):
-                    torch.nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
 
     def unpatchify(self, x):
         """
@@ -284,7 +262,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, s, t, x, t_cond, x_cond, y, return_projections=False):
+    def forward(self, s, t, x, t_cond, x_cond, y):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -309,11 +287,8 @@ class DiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = s_first + t_first + t_cond + y               # (N, D)
         
-        z_tilde = None
         for i, block in enumerate(self.blocks[:20]):
             x = block(x, c)                      # (N, T, D)
-            if return_projections and self.z_dim is not None and (i + 1) == self.encoder_depth:
-                 z_tilde = self.proj_head(x)
 
         s_second = self.s_embedder_second(s)                   # (N, D)
         t_second = self.t_embedder_second(t)                   # (N, D)
@@ -323,10 +298,8 @@ class DiT(nn.Module):
             
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        x = -x
-        if return_projections:
-             return x, z_tilde
-        return x
+
+        return -x
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """
@@ -347,9 +320,9 @@ class DiT(nn.Module):
         return torch.cat([eps, rest], dim=1)
 
 class DiTMFM(BaseModel):
-    def __init__(self, learn_loss_weighting, channels=128, z_dim=None, projector_dim=2048, encoder_depth=8, **dit_kwargs):
+    def __init__(self, learn_loss_weighting, channels=128, encoder_depth=8, **dit_kwargs):
         super().__init__()
-        self.dit = DiT(z_dim=z_dim, projector_dim=projector_dim, encoder_depth=encoder_depth, **dit_kwargs)
+        self.dit = DiT(encoder_depth=encoder_depth, **dit_kwargs)
         self.frozen = False
 
     def freeze_dit(self):
