@@ -75,18 +75,20 @@ def get_consistency_loss_fn(cfg, SI):
         Is = (1 - expanded_s_uniform) * x0 + expanded_s_uniform * x1
 
         if cfg.loss.distill_fm:
-            posterior_var = ((1-t_cond)**2 * (1-s_uniform)**2) / (t_cond**2 * (1-s_uniform)**2 + (1-t_cond)**2 * s_uniform**2)
+            eps = 1e-4
+            posterior_var = ((1-t_cond)**2 * (1-s_uniform)**2) / (t_cond**2 * (1-s_uniform)**2 + (1-t_cond)**2 * s_uniform**2).clamp_min(eps)
             t_star = 1 / (1 + torch.sqrt(posterior_var))
             t_star_expanded = broadcast_to_shape(t_star, x1.shape)
             posterior_var_expanded = broadcast_to_shape(posterior_var, x1.shape)
             t_cond_expanded = broadcast_to_shape(t_cond, x1.shape)
             s_uniform_expanded = broadcast_to_shape(s_uniform, x1.shape)
-            x_star = t_star_expanded *  posterior_var_expanded * (t_cond_expanded / (1-t_cond_expanded)**2 * xt_cond + s_uniform_expanded / (1-s_uniform_expanded)**2 * Is)
+            x_star = t_star_expanded *  posterior_var_expanded * (t_cond_expanded / (1-t_cond_expanded).clamp_min(eps)**2 * xt_cond + s_uniform_expanded / (1-s_uniform_expanded).clamp_min(eps)**2 * Is)
             # print(t_star.shape, x_star.shape)
-            with torch.amp.autocast('cuda', enabled=True, dtype=x1.dtype if x1.dtype in [torch.bfloat16, torch.float16] else None):
-                v_star = teacher_model.v(t_star, t_star, x_star, torch.zeros_like(t_star), torch.zeros_like(x_star), class_labels=labels)
-                post_mean = x_star + (1.0 - t_star) * v_star
-                dIsds = (post_mean - Is) / (1.0 - s_uniform_expanded)
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', enabled=True, dtype=x1.dtype if x1.dtype in [torch.bfloat16, torch.float16] else None):
+                    v_star = teacher_model.v(t_star, t_star, x_star, torch.zeros_like(t_star), torch.zeros_like(x_star), class_labels=labels)
+                    post_mean = x_star + (1.0 - t_star_expanded) * v_star
+                    dIsds = (post_mean - Is) / (1.0 - s_uniform_expanded).clamp_min(eps)
         else:
             dIsds = x1 - x0
 
