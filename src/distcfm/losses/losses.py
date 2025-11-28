@@ -84,7 +84,9 @@ def get_consistency_loss_fn(cfg, SI):
             x_star = t_star_expanded *  posterior_var_expanded * (t_cond_expanded / (1-t_cond_expanded)**2 * xt_cond + s_uniform_expanded / (1-s_uniform_expanded)**2 * Is)
             # print(t_star.shape, x_star.shape)
             with torch.amp.autocast('cuda', enabled=True, dtype=x1.dtype if x1.dtype in [torch.bfloat16, torch.float16] else None):
-                dIsds = teacher_model.v(t_star, t_star, x_star, torch.zeros_like(t_star), torch.zeros_like(x_star), class_labels=labels)
+                v_star = teacher_model.v(t_star, t_star, x_star, torch.zeros_like(t_star), torch.zeros_like(x_star), class_labels=labels)
+                post_mean = x_star + (1.0 - t_star) * v_star
+                dIsds = (post_mean - Is) / (1.0 - s_uniform_expanded)
         else:
             dIsds = x1 - x0
 
