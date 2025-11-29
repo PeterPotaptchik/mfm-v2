@@ -15,7 +15,7 @@ import numpy as np
 import math
 # from timm.models.vision_transformer import Attention, PatchEmbed, Mlp
 from timm.models.vision_transformer import PatchEmbed, Mlp
-from distcfm.models.attention import Attention
+from distcfm.models.attention import Attention, JointAttention
 from distcfm.models.edm2 import MPConv, MPFourier
 from distcfm.models.base_model import BaseModel
 
@@ -87,22 +87,37 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, use_joint_attention=False, input_size=None, patch_size=None, in_channels=None, **block_kwargs):
         super().__init__()
+        self.use_joint_attention = use_joint_attention
+        if use_joint_attention:
+            self.x_cond_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+            num_patches = self.x_cond_embedder.num_patches
+            # Will use fixed sin-cos embedding:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+            self.joint_attn = JointAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+            self.modulation_size = 7
+        else:
+            self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+            self.modulation_size = 6
+
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(hidden_size, self.modulation_size * hidden_size, bias=True)
         )
 
-    def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+    def forward(self, x, x_cond, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, *gate_ja = self.adaLN_modulation(c).chunk(self.modulation_size, dim=1)
+        if self.use_joint_attention:
+            x_cond = self.x_cond_embedder(x_cond) + self.pos_embed
+            x = x + gate_msa.unsqueeze(1) * self.joint_attn(modulate(self.norm1(x), shift_msa, scale_msa), x_cond, gate_ja[0])
+        else:
+            x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -144,6 +159,7 @@ class DiT(nn.Module):
         learn_sigma=False,
         encoder_depth=8,
         qk_norm=False,
+        use_joint_attention=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -172,9 +188,9 @@ class DiT(nn.Module):
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
-
+        
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm, use_joint_attention=use_joint_attention, input_size=input_size, patch_size=patch_size, in_channels=in_channels) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
     
@@ -202,6 +218,17 @@ class DiT(nn.Module):
         # Initialize x_cond_embedder to zero
         nn.init.constant_(self.x_cond_embedder.proj.weight, 0)
         nn.init.constant_(self.x_cond_embedder.proj.bias, 0)
+
+        # Initialize DiTBlock specific components if joint attention is used
+        for block in self.blocks:
+            if hasattr(block, 'x_cond_embedder'):
+                nn.init.constant_(block.x_cond_embedder.proj.weight, 0)
+                nn.init.constant_(block.x_cond_embedder.proj.bias, 0)
+            if hasattr(block, 'pos_embed'):
+                num_patches = block.x_cond_embedder.num_patches
+                grid_size = int(num_patches ** 0.5)
+                pos_embed = get_2d_sincos_pos_embed(block.pos_embed.shape[-1], grid_size)
+                block.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize x_cond_adaLN to zero
         nn.init.constant_(self.x_cond_adaLN[-1].weight, 0)
@@ -268,7 +295,7 @@ class DiT(nn.Module):
         c = s_first + t_first + t_cond + y               # (N, D)
         
         for i, block in enumerate(self.blocks[:20]):
-            x = block(x, c)                      # (N, T, D)
+            x = block(x, x_cond, c)                           # (N, T, D)
 
         s_second = self.s_embedder_second(s)                   # (N, D)
         t_second = self.t_embedder_second(t)                   # (N, D)

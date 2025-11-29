@@ -70,7 +70,7 @@ def main(cfg: DictConfig):
     # If we can't shuffle the existing loader easily, we can just iterate and pick random
     if hasattr(datamodule, 'imagenet_val'):
         val_dataset = datamodule.imagenet_val
-        target_classes = {978, 979, 980, 292}
+        target_classes = torch.arange(1000)
         print(f"Filtering ImageNet validation set for classes {min(target_classes)}-{max(target_classes)}...")
             
         # Efficiently find indices using list comprehension on targets
@@ -149,6 +149,38 @@ def main(cfg: DictConfig):
         # Initialize x_cond_embedder from x_embedder (checkpoint)
         print("Initializing x_cond_embedder from x_embedder...")
         target_model.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
+
+        # Initialize per-block x_cond_embedders if using joint attention
+        if hasattr(target_model, "blocks"):
+            print("Initializing per-block x_cond_embedders from x_embedder...")
+            for block in target_model.blocks:
+                if hasattr(block, "x_cond_embedder"):
+                    block.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
+                
+                # Initialize kv_cond from qkv if using joint attention
+                if hasattr(block, "joint_attn"):
+                    print("Initializing joint_attn.kv_cond from qkv...")
+                    # qkv weight shape: [3*dim, dim] -> q, k, v
+                    # kv_cond weight shape: [2*dim, dim] -> k, v
+                    qkv_weight = block.joint_attn.qkv.weight.data
+                    dim = qkv_weight.shape[1]
+                    
+                    # Extract k and v from qkv
+                    # qkv is [q, k, v]
+                    k_weight = qkv_weight[dim:2*dim]
+                    v_weight = qkv_weight[2*dim:]
+                    
+                    # Set kv_cond weight
+                    block.joint_attn.kv_cond.weight.data[:dim] = k_weight
+                    block.joint_attn.kv_cond.weight.data[dim:] = v_weight
+                    
+                    # Handle bias if present
+                    if block.joint_attn.qkv.bias is not None:
+                        qkv_bias = block.joint_attn.qkv.bias.data
+                        k_bias = qkv_bias[dim:2*dim]
+                        v_bias = qkv_bias[2*dim:]
+                        block.joint_attn.kv_cond.bias.data[:dim] = k_bias
+                        block.joint_attn.kv_cond.bias.data[dim:] = v_bias
 
         # Initialize s_embedder from t_embedder (checkpoint)
         print("Initializing s_embedder from t_embedder...")
