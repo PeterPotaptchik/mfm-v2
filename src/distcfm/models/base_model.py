@@ -2,8 +2,18 @@ import torch.nn as nn
 import torch
 from abc import ABC, abstractmethod
 import math
+import numpy as np
 import itertools
 
+
+# SHouldnt be copying these from edm2
+
+def normalize(x, dim=None, eps=1e-4):
+    if dim is None:
+        dim = list(range(1, x.ndim))
+    norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)
+    norm = torch.add(eps, norm, alpha=np.sqrt(norm.numel() / x.numel()))
+    return x / norm.to(x.dtype)
 
 class MPConv(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel):
@@ -73,58 +83,31 @@ class LossWeightingNetwork(nn.Module):
     def __init__(self, channels=128, clamp_min=-10.0, clamp_max=10.0):
         super().__init__()
         self.linear = MPConv(channels, 1, kernel=[])
-        self.linear_off_diag = MPConv(channels, 1, kernel=[])
         self.emb_fourier = MPFourier(channels)
         self.emb_noise_t = MPConv(channels, channels, kernel=[])
-        self.emb_noise_s = MPConv(channels, channels, kernel=[])
         self.emb_noise_t_cond = MPConv(channels, channels, kernel=[])
         self._weighting_stats = []
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
-
-    def _compute_both_weights(self, s, t, t_cond):
-        s_emb = self.emb_noise_s(self.emb_fourier(s))
+    
+    def forward(self, t, t_cond):
         t_emb = self.emb_noise_t(self.emb_fourier(t))
         t_cond_emb = self.emb_noise_t_cond(self.emb_fourier(t_cond))
-        combined = (s_emb + t_emb + t_cond_emb) / math.sqrt(3.0)
-        diagonal_weighting = self.linear(combined)
-        off_diagonal_weighting = self.linear_off_diag(combined)
-        return diagonal_weighting, off_diagonal_weighting
-
-    def _compute_weighting(self, s, t, t_cond, ema_state=None):
-        if not ema_state:
-            diag, off_diag = self._compute_both_weights(s, t, t_cond)
-        else: # straight-through estimator
-            diag_curr, off_diag_curr = self._compute_both_weights(s, t, t_cond)  # current
-            diag_ema, off_diag_ema = ema_state._average_model.module.weighting_model._compute_both_weights(s, t, t_cond) # ema
-            diag = diag_ema.detach() + (diag_curr - diag_curr.detach())
-            off_diag = off_diag_ema.detach() + (off_diag_curr - off_diag_curr.detach())
-        return diag, off_diag
-    
-    def forward(self, s, t, t_cond, ema_state=None):
-        diagonal_weighting, off_diagonal_weighting = self._compute_weighting(s, t, t_cond, ema_state)
-        is_diag_bool = torch.eq(s, t)
-        is_diag = is_diag_bool.float()[:, None]   
-        weighting = is_diag * diagonal_weighting + (1.0 - is_diag) * off_diagonal_weighting
-        diagonal_weighting, off_diagonal_weighting = diagonal_weighting[is_diag_bool], off_diagonal_weighting[~is_diag_bool]
-        self._record_weighting_stats(diagonal_weighting, off_diagonal_weighting)
+        combined = (t_emb + t_cond_emb) / math.sqrt(2.0)
+        weighting = self.linear(combined)
+        self._record_weighting_stats(weighting)
         weighting = weighting.reshape(-1, 1, 1, 1)
         weighting = torch.clamp(weighting, self.clamp_min, self.clamp_max)
         return weighting
 
-    def _record_weighting_stats(self, diagonal_weighting, off_diagonal_weighting):
+    def _record_weighting_stats(self, weighting):
         with torch.no_grad():
             stats = {
-                "diag_weighting_mean": diagonal_weighting.mean().detach(),
-                "diag_weighting_std": diagonal_weighting.std(unbiased=False).detach(),
-                "diag_var_mean": diagonal_weighting.exp().mean().detach(),
-                "diag_var_min": diagonal_weighting.exp().min().detach(),
-                "diag_var_max": diagonal_weighting.exp().max().detach(),
-                "off_diag_weighting_mean": off_diagonal_weighting.mean().detach(),
-                "off_diag_weighting_std": off_diagonal_weighting.std(unbiased=False).detach(),
-                "off_diag_var_mean": off_diagonal_weighting.exp().mean().detach(),
-                "off_diag_var_min": off_diagonal_weighting.exp().min().detach(),
-                "off_diag_var_max": off_diagonal_weighting.exp().max().detach(),
+                "weighting_mean": weighting.mean().detach(),
+                "weighting_std": weighting.std(unbiased=False).detach(),
+                "weighting_var_mean": weighting.exp().mean().detach(),
+                "weighting_var_min": weighting.exp().min().detach(),
+                "weighting_var_max": weighting.exp().max().detach(),
             }
         self._weighting_stats.append(stats)
 

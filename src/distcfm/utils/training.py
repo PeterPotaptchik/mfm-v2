@@ -77,10 +77,10 @@ class TrainingModule(pl.LightningModule):
         if self.teacher_model:
             self.teacher_model.to(self.device)
 
-    def on_after_backward(self):
-        for name, param in self.named_parameters():
-            if param.grad is None:
-                print(f"Unused parameter: {name}")
+    # def on_after_backward(self):
+    #     for name, param in self.named_parameters():
+    #         if param.grad is None:
+    #             print(f"Unused parameter: {name}")
 
     def on_train_start(self):
         if self.vae:
@@ -158,6 +158,10 @@ class TrainingModule(pl.LightningModule):
         for name, loss in losses.items():
             if name == "distillation_loss":
                 total_loss += loss * self.cfg.loss.distillation_weight
+            elif name == "distill_fm_loss":
+                total_loss += loss * self.cfg.loss.distill_fm_weight
+            elif name == "fm_loss":
+                total_loss += loss * self.cfg.loss.fm_weight
             else:
                 total_loss += loss
 

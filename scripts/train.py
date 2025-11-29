@@ -135,7 +135,12 @@ def main(cfg: DictConfig):
         print("Loading state dict into DiT...")
         missing, unexpected = target_model.load_state_dict(sit_state_dict, strict=False)
         print(f"Missing keys: {len(missing)}")
-        
+        for key in missing:
+            print(f"  - {key}")
+        print(f"Unexpected keys: {len(unexpected)}")
+        for key in unexpected:
+            print(f"  - {key}")
+
         # Initialize missing keys to zero
         if missing:
              print(f"Initializing {len(missing)} missing keys to zero...")
@@ -175,6 +180,11 @@ def main(cfg: DictConfig):
         
         print("SiT checkpoint loaded successfully.")
 
+        # Sync teacher model with student model after loading weights
+        if train_module.teacher_model is not None:
+            print("Syncing teacher model weights from student...")
+            train_module.teacher_model.load_state_dict(train_module.model.state_dict())
+
     if cfg.compile:
         train_module = torch.compile(train_module)
 
@@ -193,6 +203,11 @@ def main(cfg: DictConfig):
         mode="min",
     )
 
+    # Enable progress bar only for rank 0 in distributed training
+    enable_progress_bar = True
+    if "SLURM_PROCID" in os.environ and int(os.environ["SLURM_PROCID"]) > 0:
+        enable_progress_bar = False
+
     trainer = pl.Trainer(
         logger=wandb_logger,
         max_steps=cfg.trainer.num_train_steps,
@@ -205,6 +220,7 @@ def main(cfg: DictConfig):
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
         precision=cfg.trainer.precision,
         gradient_clip_val=cfg.trainer.gradient_clip_val,
+        enable_progress_bar=enable_progress_bar,
     )
 
     resume_path = cfg.get("resume_from_checkpoint")
