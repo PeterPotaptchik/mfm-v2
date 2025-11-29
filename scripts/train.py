@@ -22,7 +22,7 @@ from distcfm.utils import EMAWeightAveraging, SamplingCallback, TrainingModule
 from distcfm.utils.evaluation import get_conditioning_data
 from torchvision.datasets.utils import download_url
 import torch.nn as nn
-
+from lightning import seed_everything
 
 def download_sit_checkpoint(model_name='last.pt'):
     local_path = f'pretrained_models/{model_name}'
@@ -50,6 +50,7 @@ def main(cfg: DictConfig):
         hydra.core.hydra_config.HydraConfig.get().runtime.output_dir,
     )
     cfg.work_dir = log_dir
+    seed_everything(cfg.seed, workers=True)
 
     model = instantiate(cfg.model)
     if cfg.compile:
@@ -63,34 +64,32 @@ def main(cfg: DictConfig):
     datamodule.setup(stage="fit")
     datamodule.setup(stage="test")
 
-    
     # For standard datasets
     test_dataloader = datamodule.test_dataloader()
+
     # If we can't shuffle the existing loader easily, we can just iterate and pick random
-    # But standard test loaders are usually not shuffled.
-    # Let's create a temporary shuffled loader
     if hasattr(datamodule, 'imagenet_val'):
-            val_dataset = datamodule.imagenet_val
-            target_classes = {978, 979, 980, 292}
-            print(f"Filtering ImageNet validation set for classes {min(target_classes)}-{max(target_classes)}...")
+        val_dataset = datamodule.imagenet_val
+        target_classes = {978, 979, 980, 292}
+        print(f"Filtering ImageNet validation set for classes {min(target_classes)}-{max(target_classes)}...")
             
-            # Efficiently find indices using list comprehension on targets
-            indices = [i for i, t in enumerate(val_dataset.targets) if t in target_classes]
+        # Efficiently find indices using list comprehension on targets
+        indices = [i for i, t in enumerate(val_dataset.targets) if t in target_classes]
             
-            # Handle insufficient samples
-            if len(indices) < cfg.sampling.n_conditioning_samples:
-                print(f"Warning: Only found {len(indices)} samples. Repeating to fill batch.")
-                indices = indices * (cfg.sampling.n_conditioning_samples // len(indices) + 1)
-            
-            # Select required samples
-            perm = torch.randperm(len(indices))
-            indices = [indices[i] for i in perm[:cfg.sampling.n_conditioning_samples].tolist()]
-            test_data = torch.stack([val_dataset[i][0] for i in indices])
+        # Handle insufficient samples
+        if len(indices) < cfg.sampling.n_conditioning_samples:
+            print(f"Warning: Only found {len(indices)} samples. Repeating to fill batch.")
+            indices = indices * (cfg.sampling.n_conditioning_samples // len(indices) + 1)
+        
+        # Select required samples
+        perm = torch.randperm(len(indices))
+        indices = [indices[i] for i in perm[:cfg.sampling.n_conditioning_samples].tolist()]
+        test_data = torch.stack([val_dataset[i][0] for i in indices])
     else:
-            # Fallback
-            test_data = get_conditioning_data(
-            test_dataloader,
-            num_samples=cfg.sampling.n_conditioning_samples,
+        # Fallback
+        test_data = get_conditioning_data(
+        test_dataloader,
+        num_samples=cfg.sampling.n_conditioning_samples,
         )
 
     inverse_scaler = datamodule.inverse_scaler
@@ -102,7 +101,6 @@ def main(cfg: DictConfig):
         # sit_ckpt_path = download_sit_checkpoint()
         # print(f"Loading SiT checkpoint from {sit_ckpt_path}")
         # sit_ckpt = torch.load(sit_ckpt_path, map_location="cpu")
-        print("HERE")
         sit_ckpt = torch.load("/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/ckpt/dmf_xl_2_256.pt", map_location="cpu", weights_only=False)
         
         if "ema" in sit_ckpt:
@@ -225,6 +223,7 @@ def main(cfg: DictConfig):
 
     resume_path = cfg.get("resume_from_checkpoint")
     ckpt_path = resume_path
+    
     if resume_path:
         print(f"Attempting to load checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location="cpu")

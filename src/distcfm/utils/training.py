@@ -6,6 +6,8 @@ import copy
 
 
 import torch
+import torch.distributed as dist
+
 import lightning as pl
 from lightning.pytorch.callbacks import Callback
 import torchvision
@@ -113,7 +115,6 @@ class TrainingModule(pl.LightningModule):
         ckpt_keys = set(state_dict.keys())
         missing_keys = model_keys - ckpt_keys
 
-    
     def _get_ema_callback(self):
         for cb in self.trainer.callbacks:
             if isinstance(cb, EMAWeightAveraging):
@@ -273,7 +274,9 @@ class TrainingModule(pl.LightningModule):
         }
 
 
+
 from distcfm.SI.samplers import kernel_sampler_fn
+
 
 class SamplingCallback(Callback):
     """Callback for generating and saving samples during training"""
@@ -289,15 +292,49 @@ class SamplingCallback(Callback):
             self.cfg.model.input_size, 
             self.cfg.model.input_size
         )
-        # for generating x_t
-        self.shared_noise = torch.randn(
-            self.cfg.sampling.n_conditioning_samples, 
-            *self.image_shape
-        )
-        # for sampling from the posterior
-        self.shared_posterior_noise = torch.randn(self.cfg.sampling.n_samples_per_image*self.cfg.sampling.n_conditioning_samples,
-                                                  *self.image_shape)
         self._last_sampled_step = -1 
+    
+    def setup(self, trainer, pl_module, stage=None):
+        self.world_size = trainer.world_size
+        self.rank = trainer.global_rank
+        device = pl_module.device
+
+        # Make unconditional samples and n_conditioning_samples divisible by world size
+        self.cfg.sampling.n_unconditional_samples = (
+            self.cfg.sampling.n_unconditional_samples // self.world_size
+        ) * self.world_size
+        self.cfg.sampling.n_conditioning_samples = (
+            self.cfg.sampling.n_conditioning_samples // self.world_size
+        ) * self.world_size
+
+        assert dist.is_available() and dist.is_initialized(), "Distributed package is not available or not initialized"
+
+        self.shared_unconditional_noise = torch.empty(
+            self.cfg.sampling.n_unconditional_samples,
+            *self.image_shape,
+            device=device,
+        )
+        if self.rank == 0:
+            self.shared_unconditional_noise.normal_()
+        dist.broadcast(self.shared_unconditional_noise, src=0)
+
+        self.shared_noise = torch.empty(
+            self.cfg.sampling.n_conditioning_samples,
+            *self.image_shape,
+            device=device,
+        )
+        if self.rank == 0:
+            self.shared_noise.normal_()
+        dist.broadcast(self.shared_noise, src=0)
+
+        self.shared_posterior_noise = torch.empty(
+            self.cfg.sampling.n_conditioning_samples * self.cfg.sampling.n_samples_per_image,
+            *self.image_shape,
+            device=device,
+        )
+        if self.rank == 0:
+            self.shared_posterior_noise.normal_()
+        dist.broadcast(self.shared_posterior_noise, src=0)
 
     def _decode_if_needed(self, pl_module, samples):
         if pl_module.vae:
@@ -320,134 +357,161 @@ class SamplingCallback(Callback):
                 images = images.view(B, N, *images.shape[1:])
 
             # images are [-1, 1]
-            return self.inverse_scaler(images) # [0, 1]
+            images = self.inverse_scaler(images) # [0, 1]
         else:
             # samples are images [-1, 1]
-            return self.inverse_scaler(samples) # [0, 1]
-        
+            images = self.inverse_scaler(samples) # [0, 1]
+        return images.clamp(0.0, 1.0)
+    
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if not trainer.is_global_zero:
+        if (trainer.global_step + 1) % self.cfg.sampling.every_n_steps != 0:
             return
-        if (trainer.global_step + 1) % self.cfg.sampling.every_n_steps == 0 and (trainer.global_step != self._last_sampled_step):
-            self._last_sampled_step = trainer.global_step
-            was_training = pl_module.training
-            pl_module.eval()
-            
-            # Use identity scaler for sampling, decode later
-            inverse_scaler_for_sampler = lambda x: x
+        if (trainer.global_step == self._last_sampled_step):
+            return 
+    
+        self._last_sampled_step = trainer.global_step
+        was_training = pl_module.training
+        pl_module.eval()
 
-            for n_steps in self.cfg.sampling.n_kernel_steps:
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    unconditional_samples_kernel = kernel_sampler_fn(
-                        pl_module.model,
+        self._run_distributed_sampling(pl_module, trainer) 
+
+        if was_training:
+            pl_module.train()
+    
+    def _gather_across_devices(self, tensor, trainer):
+        """
+        All-gather `tensor` across ranks and return a single concatenated tensor
+        on every rank. Assumes the leading dim is batch.
+        """
+        if trainer.world_size == 1:
+            return tensor
+
+        gathered = trainer.strategy.all_gather(tensor)
+        gathered = gathered.reshape(-1, *tensor.shape[1:])
+        return gathered
+    
+    def _run_distributed_sampling(self, pl_module, trainer):
+        device = pl_module.device
+
+        for n_steps in self.cfg.sampling.n_kernel_steps:
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                all_indices = torch.arange(self.cfg.sampling.n_unconditional_samples, device=device)
+                device_indices = all_indices[self.rank::self.world_size]
+                unconditional_noise_device = self.shared_unconditional_noise[device_indices]
+                unconditional_samples_kernel = kernel_sampler_fn(
+                    pl_module.model,
                         shape=self.image_shape,
                         shape_decoded=self.image_shape, # Return latents if VAE
                         SI=self.SI,
-                        n_samples=self.cfg.sampling.n_unconditional_samples,
+                        n_samples=unconditional_noise_device.shape[0],
                         n_batch_size=self.cfg.sampling.batch_size,
                         n_steps=n_steps,
-                        inverse_scaler_fn=inverse_scaler_for_sampler
+                        inverse_scaler_fn=lambda x: x,
+                        x0=unconditional_noise_device
                     )
-                
-                # Decode and inverse scale
-                unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel)
-                
-                unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
+            
+            unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel)
+            unconditional_samples_kernel = self._gather_across_devices(unconditional_samples_kernel, trainer)
+            unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
+
+            if trainer.is_global_zero:
                 self._save_samples_unconditional(
                     pl_module, unconditional_samples_kernel, 
-                    title=f"unconditional_samples_kernel_{n_steps}"
-                )
-                del unconditional_samples_kernel
+                    title=f"unconditional_samples_kernel_{n_steps}")
 
-            for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+        # get device dependent test-data/corruption-noise/init-noise
+        all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples, device=device)
+        device_indices = all_indices[self.rank::self.world_size]
+        data_device = self.test_data[device_indices].to(device)
+        shared_noise_device = self.shared_noise[device_indices]
+        
+        all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples * self.cfg.sampling.n_samples_per_image, 
+                                    device=device)
+        device_indices = all_indices[self.rank::self.world_size]
+        shared_posterior_device = self.shared_posterior_noise[device_indices]
+
+        for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                ode_x_t, ode_x_0 = self._sample_batch(
+                    pl_module, t_cond, self.cfg.ode_sampling_cfg, 
+                    data_device, shared_noise_device, shared_posterior_device
+                )
+                ode_x_t = self._decode_if_needed(pl_module, ode_x_t)
+                ode_x_0 = self._decode_if_needed(pl_module, ode_x_0)
+
+            ode_x_t = self._gather_across_devices(ode_x_t, trainer)
+            ode_x_0 = self._gather_across_devices(ode_x_0, trainer)
+
+            if trainer.is_global_zero:
+                self._save_samples(pl_module, ode_x_t, ode_x_0, t_cond, "ode", steps=None)
+
+            for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
+                sampling_cfg = self.cfg.consistency_sampling_cfg.copy()
+                sampling_cfg.consistency.steps = n_steps
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    ode_x_t, ode_x_0 = self._sample_batch(
-                        pl_module, t_cond, self.cfg.ode_sampling_cfg
+                    cons_x_t, cons_x_0 = self._sample_batch(
+                        pl_module, t_cond, sampling_cfg,
+                        data_device, shared_noise_device, shared_posterior_device
                     )
-                # Do not clamp here, clamp after decoding in _save_samples
-                self._save_samples(
-                    pl_module, ode_x_t, ode_x_0, t_cond, 
-                    "ode", steps=None
-                )
-                del ode_x_t, ode_x_0
+                    cons_x_t = self._decode_if_needed(pl_module, cons_x_t)
+                    cons_x_0 = self._decode_if_needed(pl_module, cons_x_0)
 
-                for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
-                    sampling_cfg = self.cfg.consistency_sampling_cfg.copy()
-                    sampling_cfg.consistency.steps = n_steps
-                    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                        cons_x_t, cons_x_0 = self._sample_batch(
-                            pl_module, t_cond, sampling_cfg
-                        )
-                    # Do not clamp here, clamp after decoding in _save_samples
-                    self._save_samples(
-                        pl_module, cons_x_t, cons_x_0, t_cond,
-                        "consistency", steps=n_steps
-                    )
-                    del cons_x_t, cons_x_0
-            if was_training:
-                pl_module.train()
-            torch.cuda.empty_cache()
-            gc.collect()
+                cons_x_t = self._gather_across_devices(cons_x_t, trainer)
+                cons_x_0 = self._gather_across_devices(cons_x_0, trainer)
 
-    def _sample_batch(self, pl_module, t_cond, sampling_cfg):
+                if trainer.is_global_zero:
+                    self._save_samples(pl_module, cons_x_t, cons_x_0, t_cond,"consistency", steps=n_steps)
+
+    def _sample_batch(self, pl_module, t_cond, sampling_cfg, x1, noise_data, noise_start,):
         x_t_list, x_1_list = [], []
+        N_local = x1.shape[0]
         bs = self.cfg.sampling.batch_size
         m = self.cfg.sampling.n_samples_per_image
-        
-        # Use identity scaler for sampling, decode later
-        inverse_scaler_for_sampler = lambda x: x
+        device = pl_module.device
 
-        for i in tqdm.tqdm(
-            range(self.cfg.sampling.n_conditioning_samples // self.cfg.sampling.batch_size), 
-            desc="Batches"
-        ):
-            x1_data = self.test_data[i*bs:(i+1)*bs].to(pl_module.device)
-            
+        for start in tqdm.tqdm(range(0, N_local, bs), desc="Batches"):
+            end = min(start + bs, N_local)
+            cur_bs = end - start
+
+            # Slice local chunks
+            x1_batch = x1[start:end]
+            noise_batch = noise_data[start:end]
+    
             # Encode if VAE
             if pl_module.vae:
                 with torch.no_grad():
                     with torch.amp.autocast('cuda', enabled=False):
-                        # Cast to VAE dtype
-                        x1_data = x1_data.to(dtype=pl_module.vae.dtype)
-                        latents = pl_module.vae.encode(x1_data).latent_dist.sample()
+                        x1_batch = x1_batch.to(dtype=pl_module.vae.dtype)
+                        latents = pl_module.vae.encode(x1_batch).latent_dist.sample()
                         latents = (latents - pl_module.latents_bias) * pl_module.latents_scale
-                        x1_data = latents.to(dtype=x1_data.dtype) # Cast back
-
-            x0_data = self.shared_noise[i*bs:(i+1)*bs].to(pl_module.device)
-            eps_start = self.shared_posterior_noise[i*(bs*m):(i+1)*(bs*m)].to(pl_module.device)
-            t_cond_tensor = torch.full((bs,), t_cond, device=pl_module.device)
+                        x1_batch = latents.to(dtype=x1_batch.dtype) # Cast back
 
             # generate noisy input
-            alpha_t, beta_t = self.SI.get_coefficients(t_cond_tensor) # Shape: [B,]
-            alpha_t, beta_t = broadcast_to_shape(alpha_t, x1_data.shape), broadcast_to_shape(beta_t, x1_data.shape)
-            xt_data = alpha_t * x0_data + beta_t * x1_data
+            t_cond_batch = torch.full((cur_bs,), t_cond, device=device)
+            alpha_t, beta_t = self.SI.get_coefficients(t_cond_batch) # Shape: [B,]
+            alpha_t, beta_t = broadcast_to_shape(alpha_t, x1_batch.shape), broadcast_to_shape(beta_t, x1_batch.shape)
+            xt_batch = alpha_t * noise_batch + beta_t * x1_batch
             
+            # get starting point for sampler
+            eps_start_batch = noise_start[start*m : end*m]  # [cur_bs*m, C, H, W]
+
             with torch.no_grad():
                 xt, x1 = posterior_sampling_fn(
                     sampling_cfg,
                     pl_module.model,
-                    xt_data,
-                    t_cond_tensor,
+                    xt_batch,
+                    t_cond_batch,
                     n_samples_per_image=m,
-                    inverse_scaler=inverse_scaler_for_sampler,
-                    eps_start=eps_start,
+                    inverse_scaler=lambda x: x,
+                    eps_start=eps_start_batch,
                 )
             x_t_list.append(xt)
             x_1_list.append(x1)
-        
         return torch.cat(x_t_list, dim=0), torch.cat(x_1_list, dim=0)
     
     def _save_samples(self, pl_module, x_t, x_0, t_cond, sample_type, steps=None):
         save_dir = os.path.join(self.cfg.work_dir, f"samples_{pl_module.global_step}_ema")
         os.makedirs(save_dir, exist_ok=True)
-
-        # Decode if needed
-        x_t = self._decode_if_needed(pl_module, x_t)
-        x_0 = self._decode_if_needed(pl_module, x_0)
-
-        # Clamp to [0, 1]
-        x_t = x_t.clamp(0.0, 1.0)
-        x_0 = x_0.clamp(0.0, 1.0)
 
         # Generate file name
         steps_str = f"_steps_{steps}" if steps is not None else ""

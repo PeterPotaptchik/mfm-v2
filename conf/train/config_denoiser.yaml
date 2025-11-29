@@ -6,6 +6,7 @@ defaults:
 
 resume_from_checkpoint: null
 use_snr_parametrisation: false   
+seed: 42
 
 lr:
   val: 0.0003
