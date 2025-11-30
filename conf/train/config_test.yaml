@@ -17,15 +17,15 @@ loss:
   fm_loss_type: l2
   fm_adaptive_loss_p: 1.0
   fm_adaptive_loss_c: 0.01
-  distillation_loss_type: adaptive
+  distillation_loss_type: lv
   distill_teacher_stop_grad: true
   distill_adaptive_loss_p: 0.5
   distill_adaptive_loss_c: 0.01
   explicit_v00_train: false
   distillation_weight: 1.0
   distill_fm_weight: 1.0
-  fm_weight: 0.0
-  distill_fm: true
+  fm_weight: 1.0
+  distill_fm: false
   distill_fm_loss_type: l2
 
 weighting_model:

@@ -16,20 +16,17 @@ def l2_loss(pred, target, weighting, stop_gradient=False,):
 
 def log_lv_loss(pred, target, weighting, stop_gradient=False):
     """Computes the mean squared L2 loss."""
-    raise NotImplementedError("log_lv_loss is currently disabled.")
-    # TODO: Return l2 for weighting
-
-    # if stop_gradient:
-    #     actual_target = torch.detach(target)
-    # else:
-    #     actual_target = target
-    # delta = pred - actual_target
-    # err = (delta)**2
-    # mean_loss = torch.mean(err, dim=list(range(1, len(pred.shape))))
-    # # Reshape mean_loss to match weighting for broadcasting: (B,) -> (B, 1, 1, 1)
-    # mean_loss = broadcast_to_shape(mean_loss, weighting.shape)
-    # log_loss = torch.log((1 / weighting.exp()) * mean_loss + 1.0) + 0.5 * weighting
-    # return torch.mean(log_loss), torch.mean(mean_loss)
+    if stop_gradient:
+        actual_target = torch.detach(target)
+    else:
+        actual_target = target
+    delta = pred - actual_target
+    err = (delta)**2
+    mean_loss = torch.mean(err, dim=list(range(1, len(pred.shape))))
+    # Reshape mean_loss to match weighting for broadcasting: (B,) -> (B, 1, 1, 1)
+    mean_loss = broadcast_to_shape(mean_loss, weighting.shape)
+    log_loss = torch.log((1 / weighting.exp()) * mean_loss + 1.0) + 0.5 * weighting
+    return torch.mean(log_loss), torch.mean(mean_loss)
 
 def adaptive_loss(pred, target, weighting, p, c, stop_gradient=False):
     """Computes the adaptively weighted squared L2 loss.

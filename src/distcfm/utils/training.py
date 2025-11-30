@@ -62,6 +62,10 @@ class TrainingModule(pl.LightningModule):
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
 
+        # Initialize EMAs for loss balancing
+        self.register_buffer("distill_fm_loss_ratio_ema", torch.tensor(1.0))
+        self.register_buffer("distillation_loss_ratio_ema", torch.tensor(1.0))
+
     @property
     def vae(self):
         return self._vae_container[0] if self._vae_container else None
@@ -155,18 +159,32 @@ class TrainingModule(pl.LightningModule):
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=False, logger=True)
 
         total_loss = 0
+        
+        # Update loss ratios
+        if "fm_loss" in losses and losses["fm_loss"] > 0:
+            fm_val = losses["fm_loss"].detach()
+            
+            if "distill_fm_loss" in losses and losses["distill_fm_loss"] > 0:
+                ratio = fm_val / (losses["distill_fm_loss"].detach() + 1e-8)
+                self.distill_fm_loss_ratio_ema = 0.99 * self.distill_fm_loss_ratio_ema + 0.01 * ratio
+                
+            if "distillation_loss" in losses and losses["distillation_loss"] > 0:
+                ratio = fm_val / (losses["distillation_loss"].detach() + 1e-8)
+                self.distillation_loss_ratio_ema = 0.99 * self.distillation_loss_ratio_ema + 0.01 * ratio
 
         for name, loss in losses.items():
             if name == "distillation_loss":
-                total_loss += loss * self.cfg.loss.distillation_weight
+                total_loss += loss * self.cfg.loss.distillation_weight * self.distillation_loss_ratio_ema
             elif name == "distill_fm_loss":
-                total_loss += loss * self.cfg.loss.distill_fm_weight
+                total_loss += loss * self.cfg.loss.distill_fm_weight * self.distill_fm_loss_ratio_ema
             elif name == "fm_loss":
                 total_loss += loss * self.cfg.loss.fm_weight
             else:
                 total_loss += loss
 
         self.log("train/total_loss", total_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self.log("train/distill_fm_loss_ratio_ema", self.distill_fm_loss_ratio_ema, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+        self.log("train/distillation_loss_ratio_ema", self.distillation_loss_ratio_ema, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log("train/lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
@@ -309,32 +327,30 @@ class SamplingCallback(Callback):
 
         assert dist.is_available() and dist.is_initialized(), "Distributed package is not available or not initialized"
 
-        self.shared_unconditional_noise = torch.empty(
+        # Use CPU generator for deterministic noise across all ranks
+        g = torch.Generator(device='cpu')
+        g.manual_seed(self.cfg.seed + 12345) # Fixed seed
+
+        self.shared_unconditional_noise = torch.randn(
             self.cfg.sampling.n_unconditional_samples,
             *self.image_shape,
-            device=device,
-        )
-        if self.rank == 0:
-            self.shared_unconditional_noise.normal_()
-        dist.broadcast(self.shared_unconditional_noise, src=0)
+            generator=g,
+            device='cpu',
+        ).to(device)
 
-        self.shared_noise = torch.empty(
+        self.shared_noise = torch.randn(
             self.cfg.sampling.n_conditioning_samples,
             *self.image_shape,
-            device=device,
-        )
-        if self.rank == 0:
-            self.shared_noise.normal_()
-        dist.broadcast(self.shared_noise, src=0)
+            generator=g,
+            device='cpu',
+        ).to(device)
 
-        self.shared_posterior_noise = torch.empty(
+        self.shared_posterior_noise = torch.randn(
             self.cfg.sampling.n_conditioning_samples * self.cfg.sampling.n_samples_per_image,
             *self.image_shape,
-            device=device,
-        )
-        if self.rank == 0:
-            self.shared_posterior_noise.normal_()
-        dist.broadcast(self.shared_posterior_noise, src=0)
+            generator=g,
+            device='cpu',
+        ).to(device)
 
     def _decode_if_needed(self, pl_module, samples, vae_batch_size):
         if pl_module.vae:
@@ -421,8 +437,8 @@ class SamplingCallback(Callback):
             
             unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel, vae_batch_size=self.cfg.sampling.vae_batch_size)
             
+            unconditional_samples_kernel = self._gather_across_devices(unconditional_samples_kernel, trainer)
             if trainer.is_global_zero:
-                unconditional_samples_kernel = self._gather_across_devices(unconditional_samples_kernel, trainer)
                 unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
                 self._save_samples_unconditional(
                     pl_module, unconditional_samples_kernel, 
@@ -431,7 +447,7 @@ class SamplingCallback(Callback):
         # get device dependent test-data/corruption-noise/init-noise
         all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples, device=device)
         device_indices = all_indices[self.rank::self.world_size]
-        data_device = self.test_data[device_indices].to(device)
+        data_device = self.test_data[device_indices.cpu()].to(device)
         shared_noise_device = self.shared_noise[device_indices]
         
         all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples * self.cfg.sampling.n_samples_per_image, 
@@ -448,9 +464,10 @@ class SamplingCallback(Callback):
                 ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
                 ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
 
+            ode_x_t = self._gather_across_devices(ode_x_t, trainer)
+            ode_x_1 = self._gather_across_devices(ode_x_1, trainer)
+
             if trainer.is_global_zero:
-                ode_x_t = self._gather_across_devices(ode_x_t, trainer)
-                ode_x_1 = self._gather_across_devices(ode_x_1, trainer)
                 self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, "ode", steps=None)
 
             for n_steps in self.cfg.consistency_sampling_cfg.steps_to_test:
@@ -464,10 +481,10 @@ class SamplingCallback(Callback):
                     cons_x_t = self._decode_if_needed(pl_module, cons_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
                     cons_x_1 = self._decode_if_needed(pl_module, cons_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
 
-                if trainer.is_global_zero:
-                    cons_x_t = self._gather_across_devices(cons_x_t, trainer)
-                    cons_x_1 = self._gather_across_devices(cons_x_1, trainer)
+                cons_x_t = self._gather_across_devices(cons_x_t, trainer)
+                cons_x_1 = self._gather_across_devices(cons_x_1, trainer)
 
+                if trainer.is_global_zero:
                     self._save_samples(pl_module, cons_x_t, cons_x_1, t_cond,"consistency", steps=n_steps)
 
     def _sample_batch(self, pl_module, t_cond, sampling_cfg, x1, noise_data, noise_start,):

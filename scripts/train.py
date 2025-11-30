@@ -24,6 +24,94 @@ from torchvision.datasets.utils import download_url
 import torch.nn as nn
 from lightning import seed_everything
 
+def initialize_joint_attention_components(target_model):
+    # Initialize x_cond_embedder from x_embedder
+    if hasattr(target_model, "x_cond_embedder"):
+        print("Initializing x_cond_embedder from x_embedder...")
+        target_model.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
+
+    # Initialize per-block x_cond_embedders if using joint attention
+    if hasattr(target_model, "blocks"):
+        print("Initializing per-block x_cond_embedders from x_embedder...")
+        for block in target_model.blocks:
+            if hasattr(block, "x_cond_embedder"):
+                block.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
+            
+            # Initialize kv_cond from qkv if using joint attention
+            if hasattr(block, "joint_attn"):
+                # print("Initializing joint_attn.kv_cond from qkv...")
+                # qkv weight shape: [3*dim, dim] -> q, k, v
+                # kv_cond weight shape: [2*dim, dim] -> k, v
+                qkv_weight = block.joint_attn.qkv.weight.data
+                dim = qkv_weight.shape[1]
+                
+                # Extract k and v from qkv
+                # qkv is [q, k, v]
+                k_weight = qkv_weight[dim:2*dim]
+                v_weight = qkv_weight[2*dim:]
+                
+                # Set kv_cond weight
+                block.joint_attn.kv_cond.weight.data[:dim] = k_weight
+                block.joint_attn.kv_cond.weight.data[dim:] = v_weight
+                
+                # Handle bias if present
+                if block.joint_attn.qkv.bias is not None:
+                    qkv_bias = block.joint_attn.qkv.bias.data
+                    k_bias = qkv_bias[dim:2*dim]
+                    v_bias = qkv_bias[2*dim:]
+                    block.joint_attn.kv_cond.bias.data[:dim] = k_bias
+                    block.joint_attn.kv_cond.bias.data[dim:] = v_bias
+
+def adapt_checkpoint_for_joint_attention(ckpt_state_dict, model_state_dict):
+    """
+    Adapts a checkpoint trained without joint attention (6 chunks in adaLN)
+    to a model with joint attention (7 chunks in adaLN).
+    """
+    print("Checking if checkpoint needs adaptation for joint attention...")
+    keys_to_modify = []
+    
+    for k, v in ckpt_state_dict.items():
+        if "adaLN_modulation.1.weight" in k or "adaLN_modulation.1.bias" in k:
+            if k in model_state_dict:
+                model_shape = model_state_dict[k].shape
+                ckpt_shape = v.shape
+                
+                # Check if mismatch corresponds to 6 vs 7 chunks
+                # Weight: [N*dim, dim], Bias: [N*dim]
+                if len(model_shape) == 2: # Weight
+                    dim = model_shape[1]
+                    if ckpt_shape[0] == 6 * dim and model_shape[0] == 7 * dim:
+                        keys_to_modify.append(k)
+                elif len(model_shape) == 1: # Bias
+                    # We can infer dim from the weight shape usually, but let's assume consistent dim
+                    # If we can't easily infer dim, we can check divisibility
+                    if ckpt_shape[0] % 6 == 0 and model_shape[0] % 7 == 0:
+                        dim = ckpt_shape[0] // 6
+                        if model_shape[0] == 7 * dim:
+                            keys_to_modify.append(k)
+
+    if keys_to_modify:
+        print(f"Adapting {len(keys_to_modify)} keys for joint attention (padding adaLN modulation)...")
+        for k in keys_to_modify:
+            v = ckpt_state_dict[k]
+            model_shape = model_state_dict[k].shape
+            
+            if len(model_shape) == 2: # Weight
+                dim = model_shape[1]
+                # Create new tensor with model shape
+                new_v = torch.zeros(model_shape, dtype=v.dtype, device=v.device)
+                # Copy existing weights
+                new_v[:6*dim, :] = v
+                # The last chunk (gate_ja) remains 0
+                ckpt_state_dict[k] = new_v
+            elif len(model_shape) == 1: # Bias
+                dim = model_shape[0] // 7
+                new_v = torch.zeros(model_shape, dtype=v.dtype, device=v.device)
+                new_v[:6*dim] = v
+                ckpt_state_dict[k] = new_v
+    else:
+        print("No adaLN modulation shape mismatch detected requiring adaptation.")
+
 def download_sit_checkpoint(model_name='last.pt'):
     local_path = f'pretrained_models/{model_name}'
     if not os.path.isfile(local_path):
@@ -146,41 +234,8 @@ def main(cfg: DictConfig):
                  if k in target_model.state_dict():
                      target_model.state_dict()[k].data.zero_()
 
-        # Initialize x_cond_embedder from x_embedder (checkpoint)
-        print("Initializing x_cond_embedder from x_embedder...")
-        target_model.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
-
-        # Initialize per-block x_cond_embedders if using joint attention
-        if hasattr(target_model, "blocks"):
-            print("Initializing per-block x_cond_embedders from x_embedder...")
-            for block in target_model.blocks:
-                if hasattr(block, "x_cond_embedder"):
-                    block.x_cond_embedder.load_state_dict(target_model.x_embedder.state_dict())
-                
-                # Initialize kv_cond from qkv if using joint attention
-                if hasattr(block, "joint_attn"):
-                    print("Initializing joint_attn.kv_cond from qkv...")
-                    # qkv weight shape: [3*dim, dim] -> q, k, v
-                    # kv_cond weight shape: [2*dim, dim] -> k, v
-                    qkv_weight = block.joint_attn.qkv.weight.data
-                    dim = qkv_weight.shape[1]
-                    
-                    # Extract k and v from qkv
-                    # qkv is [q, k, v]
-                    k_weight = qkv_weight[dim:2*dim]
-                    v_weight = qkv_weight[2*dim:]
-                    
-                    # Set kv_cond weight
-                    block.joint_attn.kv_cond.weight.data[:dim] = k_weight
-                    block.joint_attn.kv_cond.weight.data[dim:] = v_weight
-                    
-                    # Handle bias if present
-                    if block.joint_attn.qkv.bias is not None:
-                        qkv_bias = block.joint_attn.qkv.bias.data
-                        k_bias = qkv_bias[dim:2*dim]
-                        v_bias = qkv_bias[2*dim:]
-                        block.joint_attn.kv_cond.bias.data[:dim] = k_bias
-                        block.joint_attn.kv_cond.bias.data[dim:] = v_bias
+        # Initialize joint attention components
+        initialize_joint_attention_components(target_model)
 
         # Initialize s_embedder from t_embedder (checkpoint)
         print("Initializing s_embedder from t_embedder...")
@@ -260,6 +315,9 @@ def main(cfg: DictConfig):
         print(f"Attempting to load checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location="cpu")
 
+        # Adapt checkpoint if necessary (e.g. for joint attention)
+        adapt_checkpoint_for_joint_attention(ckpt["state_dict"], train_module.state_dict())
+
         print("Checking for missing/unexpected keys...")
         missing_keys, unexpected_keys = train_module.load_state_dict(
             ckpt["state_dict"], strict=False
@@ -294,6 +352,19 @@ def main(cfg: DictConfig):
             print("Checkpoint missing optimizer state; trainer will start with fresh optimizer state\n")
         else:
             print("Checkpoint already weights-only; will rely on Lightning to restore remaining state\n")
+
+        # Check if joint attention components are missing and initialize them if needed
+        target_model = train_module.model.model
+        if hasattr(target_model, "dit"):
+            target_model = target_model.dit
+            
+        # Check if any joint attention related keys are missing
+        joint_attn_missing = any("joint_attn" in k for k in missing_keys)
+        x_cond_missing = any("x_cond_embedder" in k for k in missing_keys)
+        
+        if joint_attn_missing or x_cond_missing:
+            print("Detected missing joint attention or x_cond keys in checkpoint. Initializing them from existing weights...")
+            initialize_joint_attention_components(target_model)
 
     trainer.fit(train_module, datamodule=datamodule, ckpt_path=ckpt_path)
 

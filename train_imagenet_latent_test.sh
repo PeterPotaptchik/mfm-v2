@@ -54,7 +54,7 @@ echo "GPUS_PER_NODE=${GPUS_PER_NODE}"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/01-35-32/checkpoints/periodic-epoch=06-step=120000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/18-34-27/checkpoints/periodic-epoch=01-step=20000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-22/12-14-22/checkpoints/periodic-epoch=00-step=5000.ckpt"
-export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-26/10-17-36/checkpoints/periodic-epoch=09-step=25000.ckpt"
+export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-29/02-08-56/checkpoints/periodic-epoch=29-step=75000.ckpt"
 
 
 # python REPA/generate.py \
@@ -102,14 +102,14 @@ srun bash -c '
     ++lr.val=0.0001 \
     ++lr.scheduler=constant \
     ++lr.warmup_steps=1000 \
-    ++trainer.num_warmup_steps=10000 \
+    ++trainer.num_warmup_steps=2000 \
     ++trainer.num_train_steps=500000 \
     ++trainer.batch_size=32 \
     ++trainer.num_workers=20 \
     ++trainer.class_dropout_prob=0.0 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
     ++loss.explicit_v00_train=false \
-    ++trainer.anneal_end_step=50000 \
+    ++trainer.anneal_end_step=5000 \
     ++loss.distillation_type=mf \
     ++trainer.accumulate_grad_batches=1 \
     ++compile=false \
@@ -118,11 +118,11 @@ srun bash -c '
     ++trainer.t_cond_warmup_steps=0 \
     ++trainer.t_cond_0_rate=0.1 \
     ++trainer.t_cond_power=1.25 \
-    ++sampling.every_n_steps=5000 \
+    ++sampling.every_n_steps=500 \
     ++use_parametrization=False \
     ++trainer.checkpoint_every_n_steps=5000 \
     ++weight_decay=0.00 \
-    +init_from_sit=True
+    "resume_from_checkpoint=\"$MODEL_CHECKPOINT\""
   '
     # "resume_from_checkpoint=\"$MODEL_CHECKPOINT\""
 

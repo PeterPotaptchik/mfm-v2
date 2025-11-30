@@ -301,7 +301,7 @@ class DiT(nn.Module):
         t_second = self.t_embedder_second(t)                   # (N, D)
         c = s_second + t_second + t_cond + y  
         for i, block in enumerate(self.blocks[20:]):
-            x = block(x, c)                      # (N, T, D)
+            x = block(x, x_cond, c)                      # (N, T, D)
             
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
