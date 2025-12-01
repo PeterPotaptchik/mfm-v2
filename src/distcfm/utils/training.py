@@ -437,7 +437,7 @@ class SamplingCallback(Callback):
         if was_training:
             pl_module.train()
     
-    def _gather_across_devices(self, tensor, trainer):
+    def _gather_across_devices(self, tensor, indices, trainer):
         """
         All-gather `tensor` across ranks and return a single concatenated tensor
         on every rank. Assumes the leading dim is batch.
@@ -447,7 +447,14 @@ class SamplingCallback(Callback):
 
         gathered = trainer.strategy.all_gather(tensor)
         gathered = gathered.reshape(-1, *tensor.shape[1:])
-        return gathered
+        
+        # Reorder to original order
+        gathered_indices = trainer.strategy.all_gather(indices) 
+        gathered_indices = gathered_indices.reshape(-1)
+        order = torch.argsort(gathered_indices)
+        gathered_tensor = gathered[order]
+
+        return gathered_tensor
     
     def _run_distributed_sampling(self, pl_module, trainer):
         device = pl_module.device
@@ -471,23 +478,24 @@ class SamplingCallback(Callback):
             
             unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel, vae_batch_size=self.cfg.sampling.vae_batch_size)
             
-            unconditional_samples_kernel = self._gather_across_devices(unconditional_samples_kernel, trainer)
+            unconditional_samples_kernel = self._gather_across_devices(unconditional_samples_kernel, device_indices, trainer)
             if trainer.is_global_zero:
                 unconditional_samples_kernel = unconditional_samples_kernel.clamp(0.0, 1.0)
                 self._save_samples_unconditional(
                     pl_module, unconditional_samples_kernel, 
                     title=f"unconditional_samples_kernel_{n_steps}")
 
-        # get device dependent test-data/corruption-noise/init-noise
+        # get device dependent test-data/corruption-noise
         all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples, device=device)
         device_indices = all_indices[self.rank::self.world_size]
         data_device = self.test_data[device_indices.cpu()].to(device)
         shared_noise_device = self.shared_noise[device_indices]
         
+        # get init noise for posterior sampling
         all_indices = torch.arange(self.cfg.sampling.n_conditioning_samples * self.cfg.sampling.n_samples_per_image, 
                                     device=device)
-        device_indices = all_indices[self.rank::self.world_size]
-        shared_posterior_device = self.shared_posterior_noise[device_indices]
+        device_indices_init = all_indices[self.rank::self.world_size]
+        shared_posterior_device = self.shared_posterior_noise[device_indices_init]
 
         for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -498,8 +506,8 @@ class SamplingCallback(Callback):
                 ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
                 ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
 
-            ode_x_t = self._gather_across_devices(ode_x_t, trainer)
-            ode_x_1 = self._gather_across_devices(ode_x_1, trainer)
+            ode_x_t = self._gather_across_devices(ode_x_t, device_indices, trainer)
+            ode_x_1 = self._gather_across_devices(ode_x_1, device_indices, trainer)
 
             if trainer.is_global_zero:
                 self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, "ode", steps=None)
@@ -515,8 +523,8 @@ class SamplingCallback(Callback):
                     cons_x_t = self._decode_if_needed(pl_module, cons_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
                     cons_x_1 = self._decode_if_needed(pl_module, cons_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
 
-                cons_x_t = self._gather_across_devices(cons_x_t, trainer)
-                cons_x_1 = self._gather_across_devices(cons_x_1, trainer)
+                cons_x_t = self._gather_across_devices(cons_x_t, device_indices, trainer)
+                cons_x_1 = self._gather_across_devices(cons_x_1, device_indices, trainer)
 
                 if trainer.is_global_zero:
                     self._save_samples(pl_module, cons_x_t, cons_x_1, t_cond,"consistency", steps=n_steps)

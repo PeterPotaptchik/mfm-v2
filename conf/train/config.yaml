@@ -10,6 +10,7 @@ use_parametrization: false
 compile: true
 
 optimizer: "Adam"
+seed: 42
 
 loss:
   distillation_type: psd

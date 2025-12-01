@@ -5,6 +5,7 @@ defaults:
   - sde: vpsde
 
 resume_from_checkpoint: null
+seed: 42
 
 loss:
   m: 2
