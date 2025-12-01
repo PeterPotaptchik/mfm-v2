@@ -104,7 +104,7 @@ srun bash -c '
     ++lr.warmup_steps=1000 \
     ++trainer.num_warmup_steps=2000 \
     ++trainer.num_train_steps=500000 \
-    ++trainer.batch_size=32 \
+    ++trainer.batch_size=25 \
     ++trainer.num_workers=20 \
     ++trainer.class_dropout_prob=0.0 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
@@ -118,7 +118,7 @@ srun bash -c '
     ++trainer.t_cond_warmup_steps=0 \
     ++trainer.t_cond_0_rate=0.1 \
     ++trainer.t_cond_power=1.25 \
-    ++sampling.every_n_steps=500 \
+    ++sampling.every_n_steps=1000 \
     ++use_parametrization=False \
     ++trainer.checkpoint_every_n_steps=5000 \
     ++weight_decay=0.00 \

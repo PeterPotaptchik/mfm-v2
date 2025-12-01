@@ -66,6 +66,38 @@ class TrainingModule(pl.LightningModule):
         self.register_buffer("distill_fm_loss_ratio_ema", torch.tensor(1.0))
         self.register_buffer("distillation_loss_ratio_ema", torch.tensor(1.0))
 
+        self._freeze_step = self.cfg.trainer.get("freeze_main_until_step", 0)
+        self._is_main_frozen = False
+        if self._freeze_step > 0:
+            self._freeze_main_model()
+
+    def _freeze_main_model(self):
+        print(f"Freezing main model parameters except joint attention until step {self._freeze_step}...")
+        self._is_main_frozen = True
+        frozen_count = 0
+        unfrozen_count = 0
+        for name, param in self.model.named_parameters():
+            if "joint_attn" in name or "x_cond" in name:
+                param.requires_grad = True
+                unfrozen_count += 1
+            else:
+                param.requires_grad = False
+                frozen_count += 1
+        print(f"Frozen {frozen_count} parameters, kept {unfrozen_count} parameters trainable (joint attention).")
+
+    def _unfreeze_main_model(self):
+        print(f"Step {self.global_step}: Unfreezing main model parameters...")
+        self._is_main_frozen = False
+        count = 0
+        for name, param in self.model.named_parameters():
+            param.requires_grad = True
+            count += 1
+        print(f"Unfroze {count} parameters.")
+
+    def on_train_batch_start(self, batch, batch_idx):
+        if self._is_main_frozen and self.global_step >= self._freeze_step:
+            self._unfreeze_main_model()
+
     @property
     def vae(self):
         return self._vae_container[0] if self._vae_container else None
@@ -248,7 +280,9 @@ class TrainingModule(pl.LightningModule):
             
     def configure_optimizers(self):
         # Get only trainable parameters (excludes repa_model which is in a list)
-        params = [p for p in self.parameters() if p.requires_grad]
+        # We include all parameters even if currently frozen (requires_grad=False)
+        # so that the optimizer tracks them and can update them once unfrozen.
+        params = [p for p in self.parameters()]
         if self.cfg.optimizer == "RAdam":
             optimizer = torch.optim.RAdam(params, lr=self.cfg.lr.val, weight_decay=self.cfg.get("weight_decay", 0.0))
         else:
@@ -521,7 +555,7 @@ class SamplingCallback(Callback):
             eps_start_batch = noise_start[start*m : end*m]  # [cur_bs*m, C, H, W]
 
             with torch.no_grad():
-                xt, x1 = posterior_sampling_fn(
+                xt, x1_out = posterior_sampling_fn(
                     sampling_cfg,
                     pl_module.model,
                     xt_batch,
@@ -531,7 +565,7 @@ class SamplingCallback(Callback):
                     eps_start=eps_start_batch,
                 )
             x_t_list.append(xt)
-            x_1_list.append(x1)
+            x_1_list.append(x1_out)
         return torch.cat(x_t_list, dim=0), torch.cat(x_1_list, dim=0)
     
     def _save_samples(self, pl_module, x_t, x_0, t_cond, sample_type, steps=None):

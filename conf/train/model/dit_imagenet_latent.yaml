@@ -19,4 +19,4 @@ label_dim: 1000
 # === attention impl ===
 # use_fused_attn: true      # uses PyTorch SDPA (FlashAttention path when available)
   
-use_joint_attention: true   # use joint spatial+channel attention
+use_joint_attention: false   # use joint spatial+channel attention
