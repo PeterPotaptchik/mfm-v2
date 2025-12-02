@@ -182,9 +182,11 @@ class TrainingModule(pl.LightningModule):
             prob = self.cfg.trainer.class_dropout_prob
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
+            null_labels = self.null_class_token.expand_as(labels)
 
         losses, aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, step, 
-                                          ema_state=self._get_ema_callback(), teacher_model=self.teacher_model)
+                                          ema_state=self._get_ema_callback(), teacher_model=self.teacher_model,
+                                          null_labels=null_labels)
         for name, loss in losses.items():
             self.log(f"train/{name}", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         for name, loss in aux_losses.items():
@@ -210,6 +212,8 @@ class TrainingModule(pl.LightningModule):
             elif name == "distill_fm_loss":
                 total_loss += loss * self.cfg.loss.distill_fm_weight * self.distill_fm_loss_ratio_ema
             elif name == "fm_loss":
+                total_loss += loss * self.cfg.loss.fm_weight
+            elif name == "model_guidance_loss":
                 total_loss += loss * self.cfg.loss.fm_weight
             else:
                 total_loss += loss

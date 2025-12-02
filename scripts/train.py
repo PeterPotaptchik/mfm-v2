@@ -242,27 +242,7 @@ def main(cfg: DictConfig):
         target_model.s_embedder.load_state_dict(target_model.t_embedder.state_dict())
         target_model.t_cond_embedder.load_state_dict(target_model.t_embedder.state_dict())
         target_model.s_embedder_second.load_state_dict(target_model.t_embedder.state_dict())
-        target_model.t_embedder_second.load_state_dict(target_model.t_embedder.state_dict())
-
-        # Zero out t_cond_embedder
-        print("Zeroing out t_cond_embedder...")
-        nn.init.constant_(target_model.t_cond_embedder.mlp[2].weight, 0)
-        nn.init.constant_(target_model.t_cond_embedder.mlp[2].bias, 0)
-        nn.init.constant_(target_model.t_embedder.mlp[2].weight, 0)
-        nn.init.constant_(target_model.t_embedder.mlp[2].bias, 0)
-        nn.init.constant_(target_model.s_embedder_second.mlp[2].weight, 0)
-        nn.init.constant_(target_model.s_embedder_second.mlp[2].bias, 0)
-
-        # Initialize x_cond_adaLN to gate off x_cond
-        # We set weights to 0 and bias to [0, -1].
-        # This gives shift=0, scale=-1.
-        # modulate(x, shift, scale) = x * (1 + scale) + shift = x * 0 + 0 = 0.
-        print("Initializing x_cond_adaLN to gate off x_cond (scale=-1)...")
-        nn.init.constant_(target_model.x_cond_adaLN[-1].weight, 0)
-        nn.init.constant_(target_model.x_cond_adaLN[-1].bias, 0)
-        half_dim = target_model.x_cond_adaLN[-1].bias.shape[0] // 2
-        nn.init.constant_(target_model.x_cond_adaLN[-1].bias[half_dim:], -1)
-        
+        target_model.t_embedder_second.load_state_dict(target_model.t_embedder.state_dict())        
         print("SiT checkpoint loaded successfully.")
 
         # Sync teacher model with student model after loading weights

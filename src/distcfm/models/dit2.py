@@ -78,6 +78,19 @@ class LabelEmbedder(nn.Module):
     def forward(self, labels, train, force_drop_ids=None):
         return self.embedding_table(labels)
 
+class GuidanceEmbedder(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+    def forward(self, s):
+        if s.dim() == 1:
+            s = s.unsqueeze(-1)  # [B, 1]
+        return self.mlp(s)      # [B, hidden_size]
 
 #################################################################################
 #                                 Core DiT Model                                #
@@ -185,6 +198,10 @@ class DiT(nn.Module):
 
         self.label_dim = label_dim
         self.y_embedder = LabelEmbedder(label_dim, hidden_size)
+
+        # Initialise guidance scale embedding (model guidance)
+        self.guidance_embedder = GuidanceEmbedder(hidden_size)
+
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -193,8 +210,6 @@ class DiT(nn.Module):
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm, use_joint_attention=use_joint_attention, input_size=input_size, patch_size=patch_size, in_channels=in_channels) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-    
-
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -218,6 +233,30 @@ class DiT(nn.Module):
         # Initialize x_cond_embedder to zero
         nn.init.constant_(self.x_cond_embedder.proj.weight, 0)
         nn.init.constant_(self.x_cond_embedder.proj.bias, 0)
+
+        # Initialize guidance_embedder to zero
+        nn.init.constant_(self.guidance_embedder.mlp[0].weight, 0)
+        nn.init.constant_(self.guidance_embedder.mlp[0].bias, 0)
+        nn.init.constant_(self.guidance_embedder.mlp[2].weight, 0)
+        nn.init.constant_(self.guidance_embedder.mlp[2].bias, 0)
+
+        # Zero out t_cond_embedder
+        nn.init.constant_(self.t_cond_embedder.mlp[2].weight, 0)
+        nn.init.constant_(self.t_cond_embedder.mlp[2].bias, 0)
+        nn.init.constant_(self.t_embedder.mlp[2].weight, 0)
+        nn.init.constant_(self.t_embedder.mlp[2].bias, 0)
+        nn.init.constant_(self.s_embedder_second.mlp[2].weight, 0)
+        nn.init.constant_(self.s_embedder_second.mlp[2].bias, 0)
+
+        # Initialize x_cond_adaLN to gate off x_cond
+        # We set weights to 0 and bias to [0, -1].
+        # This gives shift=0, scale=-1.
+        # modulate(x, shift, scale) = x * (1 + scale) + shift = x * 0 + 0 = 0.
+        print("Initializing x_cond_adaLN to gate off x_cond (scale=-1)...")
+        nn.init.constant_(target_model.x_cond_adaLN[-1].weight, 0)
+        nn.init.constant_(target_model.x_cond_adaLN[-1].bias, 0)
+        half_dim = target_model.x_cond_adaLN[-1].bias.shape[0] // 2
+        nn.init.constant_(target_model.x_cond_adaLN[-1].bias[half_dim:], -1)
 
         # Initialize DiTBlock specific components if joint attention is used
         for block in self.blocks:
@@ -269,7 +308,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, s, t, x, t_cond, x_cond, y):
+    def forward(self, s, t, x, t_cond, x_cond, y, **kwargs):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -280,6 +319,8 @@ class DiT(nn.Module):
         s = 1 - s
         t = 1 - t
         t_cond = 1 - t_cond
+        # for amortized classifier-free guidance
+        cfg_scale = kwargs.get('cfg_scale', None) # [N,] or None
 
         x_emb = self.x_embedder(x)
         x_cond_emb = self.x_cond_embedder(x_cond)
@@ -292,8 +333,14 @@ class DiT(nn.Module):
         s_first = self.s_embedder(s)                   # (N, D)
         t_first = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
+        
         c = s_first + t_first + t_cond + y               # (N, D)
         
+        # amortize classifier-free guidance by adding the guidance embedding to c
+        if cfg_scale is not None:
+            guidance_emb = self.guidance_embedder(cfg_scale)  # (N, D)
+            c = c + guidance_emb
+
         for i, block in enumerate(self.blocks[:20]):
             x = block(x, x_cond, c)                           # (N, T, D)
 
@@ -342,11 +389,11 @@ class DiTMFM(BaseModel):
             param.requires_grad = True
             self.frozen = False
 
-    def v(self, s, t, x, t_cond, x_cond, class_labels=None):
+    def v(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
         if class_labels is None:
             class_labels = torch.full((x.shape[0],), self.dit.label_dim, dtype=torch.long, device=x.device)
       
-        v = self.dit(s, t, x, t_cond, x_cond, class_labels)
+        v = self.dit(s, t, x, t_cond, x_cond, class_labels, **kwargs)
         return v
 
 

@@ -53,7 +53,10 @@ def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
 def get_consistency_loss_fn(cfg, SI):
-    def loss_fn(model, weighting_model, x1, labels, step, ema_state=None, teacher_model=None):
+    def loss_fn(model, weighting_model, x1, labels, step, ema_state=None, teacher_model=None, null_labels=None):
+        if cfg.loss.model_guidance and cfg.loss.distillation_type != "mf":
+            raise ValueError("Model guidance is only supported with MF distillation.")
+
         # --- 1. Generate Conditioning Variables ---
         device = x1.device
         N = x1.shape[0]  # batch size
@@ -78,7 +81,12 @@ def get_consistency_loss_fn(cfg, SI):
         dIsds = x1 - x0
         
         # Model prediction
-        fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
+        if cfg.loss.model_guidance:
+            cfg_scale = torch.ones_like(s_uniform, device=device)
+            fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,
+                              cfg_scale=cfg_scale)
+        else:
+            fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
         
         if cfg.model.learn_loss_weighting:
             fm_loss_weighting = weighting_model(s_uniform, t_cond)
@@ -93,6 +101,28 @@ def get_consistency_loss_fn(cfg, SI):
             adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
         )
 
+        # Learn the amortized velocity field (w > 0) for improved few-shot FIDs
+        if cfg.loss.model_guidance:
+            ws = cfg.losses.model_guidance_ws 
+            rand_indices = torch.randint(0, len(ws), (N,))
+            cfg_scale = torch.tensor([ws[i] for i in rand_indices], device=device)
+            v_cfg_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,    
+                                 cfg_scale=cfg_scale)
+            # construct a target (self-distillation)
+            with torch.no_grad(): 
+                v_uncond = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=null_labels,
+                                   cfg_scale=torch.ones_like(s_uniform, device=device))
+                v_cond = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,
+                                 cfg_scale=torch.ones_like(s_uniform, device=device))
+                v_cfg_target = v_uncond + broadcast_to_shape(cfg_scale, v_cond.shape) * (v_cond - v_uncond)
+            
+            model_guidance_loss, model_guidance_loss_unweighted = compute_loss(
+                        v_cfg_pred, v_cfg_target, fm_loss_weighting, 
+                        cfg.loss.fm_loss_type,
+                        adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
+                        adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
+                    )
+        
         # Distilled FM Loss
         distill_fm_loss = torch.tensor(0.0, device=device)
         distill_fm_loss_unweighted = torch.tensor(0.0, device=device)
@@ -134,12 +164,11 @@ def get_consistency_loss_fn(cfg, SI):
                 adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
                 adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
             )
-
             # print(f"time_diff: {(t_star - s_uniform).mean().item():.4f}, x_diff: {(x_star-Is).mean().item():.4f}, v_diff: {(v_star-dIsds_distill).mean().item():.4f},  distill_fm_loss: {distill_fm_loss.item():.6f}")
 
         s, u = sample_s_u(N, step, cfg)  # [B,]
         s, u = s.to(device), u.to(device)
-        
+
         # --- 3. Distillation Loss (on the off-diagonal s<u) ---
         if step > cfg.trainer.num_warmup_steps:
             x0 = torch.randn_like(x1)
@@ -157,14 +186,31 @@ def get_consistency_loss_fn(cfg, SI):
                 distillation_teacher = dXdu
 
             elif cfg.loss.distillation_type == "mf":
-                vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels)
-                vss = vsu_fn(s, s, Is)
+                if not cfg.loss.model_guidance: # standard 
+                    vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels)
+                    vss = vsu_fn(s, s, Is)
+                else:
+                    with torch.no_grad():
+                        # get the guidance scales for distillation
+                        scales = torch.randint(0, len(cfg.losses.model_guidance_ws), (N,))
+                        cfg_scale = torch.tensor([cfg.losses.model_guidance_ws[i] for i in cfg_scale], device=device)
+                        p = cfg.loss.model_guidance_distill_base_prob
+                        cfg_mask = torch.bernoulli(torch.full(N, p, device=self.device)).bool()
+                        cfg_scales_distill = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
+                        # compute the vss
+                        v_uncond = model.v(s, s, Is, t_cond, xt_cond, class_labels=null_labels, cfg_scale=torch.ones_like(s, device=device))
+                        v_cond = model.v(s, s, Is, t_cond, xt_cond, class_labels=labels, cfg_scale=torch.ones_like(s, device=device))
+                        vss = v_uncond + broadcast_to_shape(cfg_scales_distill, v_cond.shape) * (v_cond - v_uncond)
+                    
+                    vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels, cfg_scale=cfg_scales_distill)
+                
                 primals = (s, u, Is)
                 tangents = (torch.ones_like(s, device=device), torch.zeros_like(u, device=device), vss)
                 vsu, jvp = torch.func.jvp(vsu_fn, primals, tangents)
-                
+
                 distillation_student = vsu
                 distillation_teacher = vss + broadcast_to_shape(u-s, jvp.shape) * jvp
+
             elif cfg.loss.distillation_type == "psd": 
                 vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels)
                 gamma = torch.rand_like(s, device=device)
@@ -191,9 +237,10 @@ def get_consistency_loss_fn(cfg, SI):
             distillation_loss = torch.tensor(0.0, device=device)
             distillation_loss_unweighted = torch.tensor(0.0, device=device)
 
-        return {"fm_loss": fm_loss, "distill_fm_loss": distill_fm_loss, "distillation_loss": distillation_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
-                                                                                                    "distill_fm_loss_unweighted": distill_fm_loss_unweighted,
-                                                                                                    "distillation_loss_unweighted": distillation_loss_unweighted}
+        return {"fm_loss": fm_loss, "distill_fm_loss": distill_fm_loss, "distillation_loss": distillation_loss, "model_guidance_loss": model_guidance_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
+                                                                                                                                                              "distill_fm_loss_unweighted": distill_fm_loss_unweighted,
+                                                                                                                                                              "distillation_loss_unweighted": distillation_loss_unweighted, 
+                                                                                                                                                              "model_guidance_loss_unweighted": model_guidance_loss_unweighted}
 
 
     return loss_fn

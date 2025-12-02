@@ -58,7 +58,7 @@ class BaseModel(nn.Module, ABC):
         super().__init__()
 
     @abstractmethod
-    def v(self, s, t, x, t_cond, x_cond, class_labels=None):
+    def v(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
         """Should return the velocity. Must be implemented by subclass."""
         pass
 
@@ -67,13 +67,13 @@ class BaseModel(nn.Module, ABC):
         t = broadcast_to_shape(t, x.shape)
         return x + (t - s) * v
 
-    def X_and_v(self, s, t, x, t_cond, x_cond, class_labels=None):
-        v = self.forward(s, t, x, t_cond, x_cond, class_labels=class_labels)
+    def X_and_v(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
+        v = self.forward(s, t, x, t_cond, x_cond, class_labels=class_labels, **kwargs)
         return self.X(s, t, x, v), v
     
-    def forward(self, s, t, x, t_cond, x_cond, class_labels=None):
+    def forward(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
         """Forward pass that computes the map."""
-        v = self.v(s, t, x, t_cond, x_cond, class_labels=class_labels)
+        v = self.v(s, t, x, t_cond, x_cond, class_labels=class_labels, **kwargs)
         return self.X(s, t, x, v)
 
 class LossWeightingNetwork(nn.Module):
