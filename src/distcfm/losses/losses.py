@@ -99,6 +99,11 @@ def get_consistency_loss_fn(cfg, SI):
             adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
             adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
         )
+        
+        # for logging 
+        with torch.no_grad():
+            fm_loss_l2 = (fm_pred - dIsds)**2
+            fm_loss_l2 = fm_loss_l2.mean()
 
         # Learn the amortized velocity field (w != 1) 
         if cfg.loss.model_guidance:
@@ -161,6 +166,10 @@ def get_consistency_loss_fn(cfg, SI):
                 adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
             )
             # print(f"time_diff: {(t_star - s_uniform).mean().item():.4f}, x_diff: {(x_star-Is).mean().item():.4f}, v_diff: {(v_star-dIsds_distill).mean().item():.4f},  distill_fm_loss: {distill_fm_loss.item():.6f}")
+        
+        with torch.no_grad():
+            distill_fm_loss_l2 = (fm_pred - dIsds_distill)**2
+            distill_fm_loss_l2 = distill_fm_loss_l2.mean()
 
         s, u = sample_s_u(N, step, cfg)  # [B,]
         s, u = s.to(device), u.to(device)
@@ -230,11 +239,18 @@ def get_consistency_loss_fn(cfg, SI):
         else:
             distillation_loss = torch.tensor(0.0, device=device)
             distillation_loss_unweighted = torch.tensor(0.0, device=device)
+        
+        with torch.no_grad():
+            distillation_loss_l2 = (distillation_student - distillation_teacher)**2
+            distillation_loss_l2 = distillation_loss_l2.mean()
 
         return {"fm_loss": fm_loss, "distill_fm_loss": distill_fm_loss, "distillation_loss": distillation_loss, "model_guidance_loss": model_guidance_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
                                                                                                                                                               "distill_fm_loss_unweighted": distill_fm_loss_unweighted,
                                                                                                                                                               "distillation_loss_unweighted": distillation_loss_unweighted, 
-                                                                                                                                                              "model_guidance_loss_unweighted": model_guidance_loss_unweighted}
+                                                                                                                                                              "model_guidance_loss_unweighted": model_guidance_loss_unweighted,
+                                                                                                                                                              "fm_loss_l2": fm_loss_l2,
+                                                                                                                                                              "distill_fm_loss_l2": distill_fm_loss_l2,
+                                                                                                                                                              "distillation_loss_l2": distillation_loss_l2}
 
 
     return loss_fn
