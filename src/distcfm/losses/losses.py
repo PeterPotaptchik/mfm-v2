@@ -82,9 +82,8 @@ def get_consistency_loss_fn(cfg, SI):
         
         # Model prediction
         if cfg.loss.model_guidance:
-            cfg_scale = torch.ones_like(s_uniform, device=device)
             fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,
-                              cfg_scale=cfg_scale)
+                              cfg_scale=torch.ones_like(s_uniform, device=device))
         else:
             fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
         
@@ -101,20 +100,18 @@ def get_consistency_loss_fn(cfg, SI):
             adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
         )
 
-        # Learn the amortized velocity field (w > 0) for improved few-shot FIDs
+        # Learn the amortized velocity field (w != 1) for improved few-shot FIDs
         if cfg.loss.model_guidance:
             ws = cfg.losses.model_guidance_ws 
             rand_indices = torch.randint(0, len(ws), (N,))
             cfg_scale = torch.tensor([ws[i] for i in rand_indices], device=device)
             v_cfg_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,    
                                  cfg_scale=cfg_scale)
-            # construct a target (self-distillation)
+            
             with torch.no_grad(): 
-                v_uncond = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=null_labels,
-                                   cfg_scale=torch.ones_like(s_uniform, device=device))
-                v_cond = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,
-                                 cfg_scale=torch.ones_like(s_uniform, device=device))
-                v_cfg_target = v_uncond + broadcast_to_shape(cfg_scale, v_cond.shape) * (v_cond - v_uncond)
+                v_cfg_target = model.v_cfg(s_uniform, s_uniform, Is, t_cond, xt_cond, 
+                                          class_labels=labels, null_labels=null_labels,
+                                          cfg_scales=cfg_scale)
             
             model_guidance_loss, model_guidance_loss_unweighted = compute_loss(
                         v_cfg_pred, v_cfg_target, fm_loss_weighting, 
@@ -198,9 +195,8 @@ def get_consistency_loss_fn(cfg, SI):
                         cfg_mask = torch.bernoulli(torch.full(N, p, device=self.device)).bool()
                         cfg_scales_distill = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
                         # compute the vss
-                        v_uncond = model.v(s, s, Is, t_cond, xt_cond, class_labels=null_labels, cfg_scale=torch.ones_like(s, device=device))
-                        v_cond = model.v(s, s, Is, t_cond, xt_cond, class_labels=labels, cfg_scale=torch.ones_like(s, device=device))
-                        vss = v_uncond + broadcast_to_shape(cfg_scales_distill, v_cond.shape) * (v_cond - v_uncond)
+                        vss = model.v_cfg(s, s, Is, t_cond, xt_cond, class_labels=labels, 
+                                          null_labels=null_labels, cfg_scales=cfg_scales_distill)
                     
                     vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels, cfg_scale=cfg_scales_distill)
                 
