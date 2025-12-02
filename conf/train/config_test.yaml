@@ -78,6 +78,16 @@ sampling:
   - 10
   kernel_churn: 0.0
   n_v00_steps: 250
+  cfg_scales:
+  - 1.0
+  - 1.5
+  - 1.75
+  - 2.0
+  - 3.0
+  x_cond_scales:
+  - 1.5
+  - 2.0
+  - 3.0
 
 ode_sampling_cfg:
   posterior_sampler: ode

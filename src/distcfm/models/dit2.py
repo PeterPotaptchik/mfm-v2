@@ -389,6 +389,7 @@ class DiTMFM(BaseModel):
     def __init__(self, learn_loss_weighting, channels=128, encoder_depth=8, **dit_kwargs):
         super().__init__()
         self.dit = DiT(encoder_depth=encoder_depth, **dit_kwargs)
+        self.label_dim = self.dit.label_dim
         self.frozen = False
 
     def freeze_dit(self):
@@ -401,13 +402,42 @@ class DiTMFM(BaseModel):
             param.requires_grad = True
             self.frozen = False
 
-    def v(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
+    def v(self, s, t, x, t_cond, x_cond, class_labels = None, **kwargs):
         if class_labels is None:
-            class_labels = torch.full((x.shape[0],), self.dit.label_dim, dtype=torch.long, device=x.device)
+            class_labels = torch.full((x.shape[0],), self.label_dim, dtype=torch.long, device=x.device)
       
         v = self.dit(s, t, x, t_cond, x_cond, class_labels, **kwargs)
         return v
-
+    
+    def v_cfg(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, return_seperate=False):
+        assert torch.equal(s, t), "implemented for velocity only!"
+        device = s.device
+        s_2 = torch.cat([s, s], dim=0)
+        t_2 = torch.cat([t, t], dim=0)
+        x_2 = torch.cat([x, x], dim=0)
+        t_cond_2 = torch.cat([t_cond, t_cond], dim=0)
+        x_cond_2 = torch.cat([x_cond, x_cond], dim=0)
+        null_labels = torch.full((x.shape[0],), self.label_dim, dtype=torch.long, device=device)
+        
+        labels = torch.cat([null_labels, class_labels], dim=0)
+        v = model.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels,
+                    cfg_scale=torch.ones_like(s_2, device=device))
+        v_uncond, v_cond = v.chunk(2, dim=0)
+        if return_seperate:
+            return v_uncond, v_cond
+        return v_uncond + broadcast_to_shape(cfg_scales, v_uncond.shape) * (v_cond - v_uncond)
+    
+    def v_cfg_mfm(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, x_cond_scales):
+        assert torch.equal(s, t), "implemented for velocity only!"
+        v_uncond, v_cond = self.v_cfg(s, t, x, t_cond, x_cond, class_labels, cfg_scales, return_seperate=True)
+        t_zeros = torch.zeros_like(t_cond) # is this what we want?
+        v_uncond_t0, v_cond_t0 = self.v_cfg(s, t, x, t_zeros, x_cond, class_labels, cfg_scales, return_seperate=True)
+        
+        # x_cond_mixing
+        v_uncond_mixed = v_uncond_t0 + broadcast_to_shape(x_cond_scales, v_uncond.shape) * (v_uncond - v_uncond_t0)
+        v_cond_mixed = v_cond_t0 + broadcast_to_shape(x_cond_scales, v_cond.shape) * (v_cond - v_cond_t0)
+        
+        return v_uncond_mixed + broadcast_to_shape(cfg_scales, v_uncond.shape) * (v_cond_mixed - v_uncond_mixed)
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #

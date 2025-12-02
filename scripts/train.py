@@ -155,30 +155,25 @@ def main(cfg: DictConfig):
     # For standard datasets
     test_dataloader = datamodule.test_dataloader()
 
-    # If we can't shuffle the existing loader easily, we can just iterate and pick random
+    # If we can't shuffle the existing loader for imagenet
     if hasattr(datamodule, 'imagenet_val'):
         val_dataset = datamodule.imagenet_val
         target_classes = torch.arange(1000)
-        print(f"Filtering ImageNet validation set for classes {min(target_classes)}-{max(target_classes)}...")
-            
-        # Efficiently find indices using list comprehension on targets
+        # pick out samples from only these classes
         indices = [i for i, t in enumerate(val_dataset.targets) if t in target_classes]
-            
-        # Handle insufficient samples
+        # repeat if not enough samples
         if len(indices) < cfg.sampling.n_conditioning_samples:
             print(f"Warning: Only found {len(indices)} samples. Repeating to fill batch.")
             indices = indices * (cfg.sampling.n_conditioning_samples // len(indices) + 1)
-        
-        # Select required samples
+        # shuffle and select
         perm = torch.randperm(len(indices))
         indices = [indices[i] for i in perm[:cfg.sampling.n_conditioning_samples].tolist()]
         test_data = torch.stack([val_dataset[i][0] for i in indices])
+        test_labels = torch.tensor([val_dataset[i][1] for i in indices])
     else:
         # Fallback
-        test_data = get_conditioning_data(
-        test_dataloader,
-        num_samples=cfg.sampling.n_conditioning_samples,
-        )
+        test_data, test_labels = get_conditioning_data(test_dataloader, num_samples=cfg.sampling.n_conditioning_samples,)
+
 
     inverse_scaler = datamodule.inverse_scaler
 
@@ -254,7 +249,7 @@ def main(cfg: DictConfig):
         train_module = torch.compile(train_module)
 
     ema_callback = EMAWeightAveraging(cfg.trainer.ema.decay)
-    sampling_callback = SamplingCallback(cfg, test_data, inverse_scaler, SI)
+    sampling_callback = SamplingCallback(cfg, test_data, test_labels, inverse_scaler, SI)
     periodic_checkpoint = ModelCheckpoint(
         dirpath=f"{log_dir}/checkpoints",
         filename="periodic-{epoch:02d}-{step}",

@@ -6,10 +6,29 @@ from torchdiffeq import odeint
 from distcfm.losses.utils import broadcast_to_shape
 
 @torch.no_grad()
-def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', eps_start=None):
-    ode_func = lambda t, x: model.v(t.expand(x.shape[0],), 
-                                    t.expand(x.shape[0],), 
-                                    x, t_cond, xt_cond)
+def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', 
+                   eps_start=None, v_type="standard", labels=None, 
+                   cfg_scales=None, x_cond_scales=None):
+    if v_type == "standard":
+        ode_func = lambda t, x: model.v(t.expand(x.shape[0],), 
+                                        t.expand(x.shape[0],), 
+                                        x, t_cond, xt_cond)
+    elif v_type == "cfg_mfm":
+        ode_func = lambda t, x: model.v_cfg_mfm(t.expand(x.shape[0],), 
+                                                t.expand(x.shape[0],), 
+                                                x, t_cond, xt_cond,
+                                                labels=labels, 
+                                                cfg_scales=cfg_scales,
+                                                x_cond_scales=x_cond_scales)
+    elif v_type == "cfg":
+        ode_func = lambda t, x: model.v_cfg(t.expand(x.shape[0],), 
+                                            t.expand(x.shape[0],), 
+                                            x, t_cond, xt_cond,
+                                            labels=labels, 
+                                            cfg_scales=cfg_scales)
+    else:
+        raise ValueError(f"Unknown velocity: {v_type}")
+
     if eps_start is None:
         eps_start = torch.randn_like(xt_cond)  # Initial condition
     else:
@@ -18,7 +37,7 @@ def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', eps_star
     sampling_hist = odeint(ode_func, eps_start, times, method=solver, atol=1e-5, rtol=1e-5)  # Last time point
     return sampling_hist[-1]
 
-def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None):
+def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None, labels=None):
     if eps_start is None:
         eps_start = torch.randn_like(xt_cond) # [B, C, H, W]
     else:

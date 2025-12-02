@@ -10,18 +10,22 @@ from distcfm.SI.samplers import consistency_sampler_fn, ode_sampler_fn
 def get_conditioning_data(test_dataloader, num_samples=256,):
     """Get conditioning data from the test dataloader."""
     data = None
+    labels = None
     for _, batch in enumerate(test_dataloader):
         try:
-            x, _ = batch
+            x, y = batch
         except:
-            x = batch
+            x, y = batch, None
         if data is None:
-            data = x
+            data, labels = x, y
         else:
             data = torch.cat((data, x), dim=0)
+            if y is not None:
+                labels = torch.cat((labels, y), dim=0)
         if data.shape[0] >= num_samples:
             break
-    
+    if labels is not None:
+        return data[:num_samples], labels[:num_samples]
     return data[:num_samples]
 
 def plot_posterior_samples(x_0, x_t, x_0_samples,
@@ -136,39 +140,39 @@ def broadcast_to_shape(tensor, shape):
 
 def posterior_sampling_fn(cfg, 
                           model, 
-                          xt_cond, # [B, C, H, W],
-                          t_cond, # [B, 1]
+                          xt_cond, # [B*N, C, H, W],
+                          t_cond, # [B*N, 1]
                           n_samples_per_image=4,
                           inverse_scaler =lambda x: (x+1)/2,
-                          eps_start=None):
+                          eps_start=None,
+                          labels=None,
+                          **kwargs):
     """Sample from the posterior distribution using the model."""
-    # Repeat to get multiple posterior samples per noisy (xt_cond, t_cond)
-    xt_cond_batched = xt_cond.repeat_interleave(n_samples_per_image, dim=0)  # [N*B, C, H, W]
-    t_cond_batched = t_cond.repeat_interleave(n_samples_per_image, dim=0)  # [N*B,]
-
     if cfg.posterior_sampler == "consistency":
         x_sample = consistency_sampler_fn(model,
-                                          xt_cond_batched, 
-                                          t_cond=t_cond_batched, 
+                                          xt_cond, 
+                                          t_cond=t_cond, 
                                           n_steps=cfg.consistency.steps, 
-                                          eps_start=eps_start)
+                                          eps_start=eps_start,
+                                          labels=labels,)
     elif cfg.posterior_sampler == "ode":
         x_sample = ode_sampler_fn(model,
-                                  xt_cond_batched,
-                                  t_cond=t_cond_batched,
+                                  xt_cond,
+                                  t_cond=t_cond,
                                   n_steps=cfg.ode.steps,
-                                  eps_start=eps_start)
+                                  eps_start=eps_start,
+                                  labels=labels,
+                                  cfg_scales=kwargs.get("cfg_scale", None),
+                                  x_cond_scale=kwargs.get("x_cond_scale", None),
+                                  v_type=kwargs.get("v_type", "standard"),)
         
     elif cfg.posterior_sampler == "distributional_diffusion":
-        noise_population = torch.randn_like(xt_cond_batched, device=xt_cond_batched.device)
-        x_sample = model(xt_cond_batched, t_cond_batched, noise_population)
+        noise_population = torch.randn_like(xt_cond, device=xt_cond_batched.device)
+        x_sample = model(xt_cond, t_cond, noise_population)
     else:
         raise ValueError(f"Unknown posterior sampler: {cfg.posterior_sampler}")
 
-    x_sample = x_sample.view(-1, 
-                             n_samples_per_image, 
-                             *x_sample.shape[1:])  # [B, N, C, H, W]
-    
+    x_sample = x_sample.view(-1, n_samples_per_image, *x_sample.shape[1:])  # [B, N, C, H, W]
     # [B, C, H, W], # [B, N, C, H, W]
     return inverse_scaler(xt_cond), inverse_scaler(x_sample)
 

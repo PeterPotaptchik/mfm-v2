@@ -58,20 +58,6 @@ class BaseModel(nn.Module, ABC):
     def v(self, s, t, x, t_cond, x_cond, class_labels=None, **kwargs):
         """Should return the velocity. Must be implemented by subclass."""
         pass
-    
-    def v_cfg(self, s, t, x, t_cond, x_cond, class_labels, null_labels, cfg_scales):
-        device = s.device
-        s_2 = torch.cat([s, s], dim=0)
-        t_2 = torch.cat([t, t], dim=0)
-        x_2 = torch.cat([x, x], dim=0)
-        t_cond_2 = torch.cat([t_cond, t_cond], dim=0)
-        x_cond_2 = torch.cat([x_cond, x_cond], dim=0)
-        labels = torch.cat([null_labels, class_labels], dim=0)
-
-        v = model.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels,
-                    cfg_scale=torch.ones_like(s_2, device=device))
-        v_uncond, v_cond = v.chunk(2, dim=0)
-        return v_uncond + broadcast_to_shape(cfg_scales, v_uncond.shape) * (v_cond - v_uncond)
 
     def X(self, s, t, x, v):
         s = broadcast_to_shape(s, x.shape)

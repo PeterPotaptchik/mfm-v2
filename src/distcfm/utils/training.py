@@ -336,10 +336,11 @@ from distcfm.SI.samplers import kernel_sampler_fn
 
 class SamplingCallback(Callback):
     """Callback for generating and saving samples during training"""
-    def __init__(self, cfg, test_data, inverse_scaler, SI):
+    def __init__(self, cfg, test_data, test_labels, inverse_scaler, SI):
         super().__init__()
         self.cfg = cfg
         self.test_data = test_data
+        self.test_labels = test_labels 
         self.inverse_scaler = inverse_scaler
         self.SI = SI
         # Use model input shape (latent shape) for sampling
@@ -500,12 +501,13 @@ class SamplingCallback(Callback):
                                     device=device)
         device_indices_init = all_indices[self.rank::self.world_size]
         shared_posterior_device = self.shared_posterior_noise[device_indices_init]
-
+        
+        # unconditional sampling
         for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 ode_x_t, ode_x_1 = self._sample_batch(
                     pl_module, t_cond, self.cfg.ode_sampling_cfg, 
-                    data_device, shared_noise_device, shared_posterior_device
+                    data_device, shared_noise_device, shared_posterior_device, v_type="standard"
                 )
                 ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
                 ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
@@ -532,8 +534,47 @@ class SamplingCallback(Callback):
 
                 if trainer.is_global_zero:
                     self._save_samples(pl_module, cons_x_t, cons_x_1, t_cond,"consistency", steps=n_steps)
+        
+        # CFG 
+        labels_device = self.test_labels[device_indices.cpu()].to(device)
+        
+        for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+            for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    ode_x_t, ode_x_1 = self._sample_batch(pl_module, t_cond, self.cfg.ode_sampling_cfg, 
+                                                          data_device, shared_noise_device, shared_posterior_device,
+                                                          labels=labels_device, cfg_scale=cfg_scale, v_type="cfg")
 
-    def _sample_batch(self, pl_module, t_cond, sampling_cfg, x1, noise_data, noise_start,):
+                    ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
+                    ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
+
+                ode_x_t = self._gather_across_devices(ode_x_t, device_indices, trainer)
+                ode_x_1 = self._gather_across_devices(ode_x_1, device_indices, trainer)
+
+                if trainer.is_global_zero:
+                    self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}", steps=None)
+        
+        # CFG on class + x_cond 
+        for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+            for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):
+                for x_cond_scale in tqdm.tqdm(self.cfg.sampling.x_cond_scales, desc="Sampling different cfg scales"):
+                    
+                    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                        ode_x_t, ode_x_1 = self._sample_batch(pl_module, t_cond, self.cfg.ode_sampling_cfg, 
+                                                              data_device, shared_noise_device, shared_posterior_device,
+                                                              labels=labels_device, cfg_scale=cfg_scale, x_cond_scale=x_cond_scale,
+                                                              v_type="cfg_mfm")
+
+                    ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
+                    ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
+
+                    ode_x_t = self._gather_across_devices(ode_x_t, device_indices, trainer)
+                    ode_x_1 = self._gather_across_devices(ode_x_1, device_indices, trainer)
+
+                    if trainer.is_global_zero:
+                        self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}_mg_{x_cond_scale}", steps=None)
+    
+    def _sample_batch(self, pl_module, t_cond, sampling_cfg, x1, noise_data, noise_start, labels=None, cfg_scale=None, x_cond_scale=None, **kwargs):
         x_t_list, x_1_list = [], []
         N_local = x1.shape[0]
         bs = self.cfg.sampling.batch_size
@@ -561,10 +602,25 @@ class SamplingCallback(Callback):
             t_cond_batch = torch.full((cur_bs,), t_cond, device=device)
             alpha_t, beta_t = self.SI.get_coefficients(t_cond_batch) # Shape: [B,]
             alpha_t, beta_t = broadcast_to_shape(alpha_t, x1_batch.shape), broadcast_to_shape(beta_t, x1_batch.shape)
-            xt_batch = alpha_t * noise_batch + beta_t * x1_batch
+            xt_batch = alpha_t * noise_batch + beta_t * x1_batch # [cur_bs, C, H, W]
             
             # get starting point for sampler
             eps_start_batch = noise_start[start*m : end*m]  # [cur_bs*m, C, H, W]
+            xt_batch = xt_batch.repeat_interleave(m, dim=0)  # [cur_bs*m, C, H, W]
+            t_cond_batch = t_cond_batch.repeat_interleave(m, dim=0)  # [cur_bs*m,]
+            
+            if labels is not None:
+                labels_batch = labels[start:end]
+                labels_batch = labels_batch.repeat_interleave(m, dim=0)  # [cur_bs*m,]
+                cfg_batch = torch.full((cur_bs * m,), cfg_scale, device=device)
+            else:
+                labels_batch = None
+                cfg_batch=None
+
+            if x_cond_scale is not None:
+                x_cond_scale_batch = torch.full((cur_bs * m,), x_cond_scale, device=device)
+            else:
+                x_cond_scale_batch = None
 
             with torch.no_grad():
                 xt, x1_out = posterior_sampling_fn(
@@ -575,9 +631,14 @@ class SamplingCallback(Callback):
                     n_samples_per_image=m,
                     inverse_scaler=lambda x: x,
                     eps_start=eps_start_batch,
+                    labels=labels_batch,
+                    cfg_scale=cfg_batch,
+                    x_cond_scale=x_cond_scale_batch,
+                    **kwargs
                 )
-            x_t_list.append(xt)
-            x_1_list.append(x1_out)
+            
+            x_t_list.append(xt) # [cur_bs, m, C, H, W]
+            x_1_list.append(x1_out) # [cur_bs, m, C, H, W]
         return torch.cat(x_t_list, dim=0), torch.cat(x_1_list, dim=0)
     
     def _save_samples(self, pl_module, x_t, x_0, t_cond, sample_type, steps=None):
