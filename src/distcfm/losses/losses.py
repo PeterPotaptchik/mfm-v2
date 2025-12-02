@@ -100,9 +100,9 @@ def get_consistency_loss_fn(cfg, SI):
             adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
         )
 
-        # Learn the amortized velocity field (w != 1) for improved few-shot FIDs
+        # Learn the amortized velocity field (w != 1) 
         if cfg.loss.model_guidance:
-            ws = cfg.losses.model_guidance_ws 
+            ws = cfg.model.model_guidance_class_ws 
             rand_indices = torch.randint(0, len(ws), (N,))
             cfg_scale = torch.tensor([ws[i] for i in rand_indices], device=device)
             v_cfg_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,    
@@ -117,8 +117,7 @@ def get_consistency_loss_fn(cfg, SI):
                         v_cfg_pred, v_cfg_target, fm_loss_weighting, 
                         cfg.loss.fm_loss_type,
                         adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
-                        adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
-                    )
+                        adaptive_c=cfg.loss.get("fm_adaptive_loss_c"))
         
         # Distilled FM Loss
         distill_fm_loss = torch.tensor(0.0, device=device)
@@ -187,14 +186,13 @@ def get_consistency_loss_fn(cfg, SI):
                     vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels)
                     vss = vsu_fn(s, s, Is)
                 else:
+                    # get the guidance scales for distillation
                     with torch.no_grad():
-                        # get the guidance scales for distillation
-                        scales = torch.randint(0, len(cfg.losses.model_guidance_ws), (N,))
-                        cfg_scale = torch.tensor([cfg.losses.model_guidance_ws[i] for i in cfg_scale], device=device)
+                        scales = torch.randint(0, len(cfg.model.model_guidance_class_ws), (N,))
+                        cfg_scale = torch.tensor([cfg.model.model_guidance_class_ws[i] for i in cfg_scale], device=device)
                         p = cfg.loss.model_guidance_distill_base_prob
                         cfg_mask = torch.bernoulli(torch.full(N, p, device=self.device)).bool()
                         cfg_scales_distill = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
-                        # compute the vss
                         vss = model.v_cfg(s, s, Is, t_cond, xt_cond, class_labels=labels, 
                                           null_labels=null_labels, cfg_scales=cfg_scales_distill)
                     

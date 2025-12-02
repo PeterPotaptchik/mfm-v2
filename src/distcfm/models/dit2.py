@@ -78,19 +78,48 @@ class LabelEmbedder(nn.Module):
     def forward(self, labels, train, force_drop_ids=None):
         return self.embedding_table(labels)
 
-class GuidanceEmbedder(nn.Module):
-    def __init__(self, hidden_size):
+class GuidanceEmbedderJoint(nn.Module):
+    def __init__(self, d, class_ws_set, x_cond_ws_set, round_decimals=4):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(1, hidden_size),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size),
-        )
+        self.class_ws_set = list(class_ws_set)
+        self.x_cond_ws_set = list(x_cond_ws_set)
+        n_class_ws = len(self.class_ws_set)
+        n_x_cond_ws = len(self.x_cond_ws_set)
+        self.embedding_table = nn.Embedding(n_class_ws * n_x_cond_ws, d)
+        
+        # for indexing 
+        self.round_decimals = round_decimals
+        self.class2idx = {
+            round(float(v), self.round_decimals): i
+            for i, v in enumerate(self.class_ws_set)
+        }
+        self.xcond2idx = {
+            round(float(v), self.round_decimals): j
+            for j, v in enumerate(self.x_cond_ws_set)
+        }
 
-    def forward(self, s):
-        if s.dim() == 1:
-            s = s.unsqueeze(-1)  # [B, 1]
-        return self.mlp(s)      # [B, hidden_size]
+    def _map_ws_to_idx(self, ws, mapping):
+        flat = ws.view(-1).tolist()
+        idx_list = []
+        for v in flat:
+            key = round(float(v), self.round_decimals)
+            if key not in mapping:
+                raise ValueError(
+                    f"Got ws={v} (rounded={key}), which is not in allowed set {list(mapping.keys())}"
+                )
+            idx_list.append(mapping[key])
+
+        return torch.tensor(idx_list, dtype=torch.long, device=ws.device)
+
+    def forward(self, class_ws, x_cond_ws):
+        class_ws = class_ws.view(-1).float()
+        x_cond_ws = x_cond_ws.view(-1).float()
+
+        class_idx = self._map_ws_to_idx(class_ws, self.class2idx)   # (B,)
+        xcond_idx = self._map_ws_to_idx(x_cond_ws, self.xcond2idx)  # (B,)
+        n_x = len(self.x_cond_ws_set)
+        combined_indices = class_idx * n_x + xcond_idx              # (B,)
+        return self.embedding_table(combined_indices)   
 
 #################################################################################
 #                                 Core DiT Model                                #
@@ -173,6 +202,8 @@ class DiT(nn.Module):
         encoder_depth=8,
         qk_norm=False,
         use_joint_attention=False,
+        model_guidance_class_ws=[1.0],
+        model_guidance_x_cond_ws=[1.0],
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -199,8 +230,8 @@ class DiT(nn.Module):
         self.label_dim = label_dim
         self.y_embedder = LabelEmbedder(label_dim, hidden_size)
 
-        # Initialise guidance scale embedding (model guidance)
-        self.guidance_embedder = GuidanceEmbedder(hidden_size)
+        # Initialise guidance scale embedding
+        self.guidance_embedder = GuidanceEmbedderJoint(hidden_size, model_guidance_class_ws, model_guidance_x_cond_ws)
 
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -234,11 +265,8 @@ class DiT(nn.Module):
         nn.init.constant_(self.x_cond_embedder.proj.weight, 0)
         nn.init.constant_(self.x_cond_embedder.proj.bias, 0)
 
-        # Initialize guidance_embedder to zero
-        nn.init.constant_(self.guidance_embedder.mlp[0].weight, 0)
-        nn.init.constant_(self.guidance_embedder.mlp[0].bias, 0)
-        nn.init.constant_(self.guidance_embedder.mlp[2].weight, 0)
-        nn.init.constant_(self.guidance_embedder.mlp[2].bias, 0)
+        # Initialize guidance_embedder to zero embeddings
+        nn.init.zeros_(self.guidance_embedder.embedding_table.weight)
 
         # Zero out t_cond_embedder
         nn.init.constant_(self.t_cond_embedder.mlp[2].weight, 0)
@@ -319,8 +347,10 @@ class DiT(nn.Module):
         s = 1 - s
         t = 1 - t
         t_cond = 1 - t_cond
+        
         # for amortized classifier-free guidance
-        cfg_scale = kwargs.get('cfg_scale', None) # [N,] or None
+        class_cfg_scale = kwargs.get('cfg_scale', None) # [N,] or None
+        x_cfg_scale = kwargs.get('x_cond_scale', None) # [N,] or None
 
         x_emb = self.x_embedder(x)
         x_cond_emb = self.x_cond_embedder(x_cond)
@@ -336,9 +366,9 @@ class DiT(nn.Module):
         
         c = s_first + t_first + t_cond + y               # (N, D)
         
-        # amortize classifier-free guidance by adding the guidance embedding to c
-        if cfg_scale is not None:
-            guidance_emb = self.guidance_embedder(cfg_scale)  # (N, D)
+        # model guidance for MFM
+        if class_cfg_scale is not None and x_cfg_scale is not None:
+            guidance_emb = self.guidance_embedder(class_cfg_scale, x_cfg_scale)  # (N, D)
             c = c + guidance_emb
 
         for i, block in enumerate(self.blocks[:20]):
@@ -354,24 +384,6 @@ class DiT(nn.Module):
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
         return -x
-
-    def forward_with_cfg(self, x, t, y, cfg_scale):
-        """
-        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
-        # For exact reproducibility reasons, we apply classifier-free guidance on only
-        # three channels by default. The standard approach to cfg applies it to all channels.
-        # This can be done by uncommenting the following line and commenting-out the line following that.
-        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
-        eps, rest = model_out[:, :3], model_out[:, 3:]
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
 
 class DiTMFM(BaseModel):
     def __init__(self, learn_loss_weighting, channels=128, encoder_depth=8, **dit_kwargs):
