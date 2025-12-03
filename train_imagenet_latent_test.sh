@@ -3,7 +3,7 @@
 #SBATCH --job-name=imagenet
 #SBATCH --account=kempner_albergo_lab
 #SBATCH --partition=kempner_h100
-#SBATCH --nodes=16
+#SBATCH --nodes=15
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=22
@@ -54,7 +54,7 @@ echo "GPUS_PER_NODE=${GPUS_PER_NODE}"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/01-35-32/checkpoints/periodic-epoch=06-step=120000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-21/18-34-27/checkpoints/periodic-epoch=01-step=20000.ckpt"
 # export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-22/12-14-22/checkpoints/periodic-epoch=00-step=5000.ckpt"
-export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-11-29/02-08-56/checkpoints/periodic-epoch=29-step=75000.ckpt"
+export MODEL_CHECKPOINT="/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/outputs/2025-12-02/02-22-49/checkpoints/periodic-epoch=39-step=125000.ckpt"
 
 
 # python REPA/generate.py \
@@ -101,16 +101,16 @@ srun bash -c '
     ++trainer.num_nodes="$NNODES" \
     ++lr.val=0.0001 \
     ++lr.scheduler=constant \
-    ++lr.warmup_steps=1000 \
-    ++trainer.num_warmup_steps=2000 \
+    ++lr.warmup_steps=2000 \
+    ++trainer.num_warmup_steps=500 \
     ++trainer.num_train_steps=500000 \
     ++trainer.batch_size=25 \
     ++trainer.num_workers=20 \
     ++trainer.class_dropout_prob=0.0 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
     ++loss.explicit_v00_train=false \
-    ++trainer.anneal_end_step=5000 \
-    ++loss.distillation_type=mf \
+    ++trainer.anneal_end_step=10000 \
+    ++loss.distillation_type=lsd \
     ++trainer.accumulate_grad_batches=1 \
     ++compile=false \
     ++optimizer=RAdam \
@@ -118,9 +118,9 @@ srun bash -c '
     ++trainer.t_cond_warmup_steps=0 \
     ++trainer.t_cond_0_rate=0.1 \
     ++trainer.t_cond_power=1.25 \
-    ++sampling.every_n_steps=1000 \
+    ++sampling.every_n_steps=50 \
     ++use_parametrization=False \
-    ++trainer.checkpoint_every_n_steps=5000 \
+    ++trainer.checkpoint_every_n_steps=10000 \
     ++weight_decay=0.00 \
     "resume_from_checkpoint=\"$MODEL_CHECKPOINT\""
   '

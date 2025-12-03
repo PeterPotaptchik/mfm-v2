@@ -349,8 +349,8 @@ class DiT(nn.Module):
         t_cond = 1 - t_cond
         
         # for amortized classifier-free guidance
-        class_cfg_scale = kwargs.get('cfg_scale', None) # [N,] or None
-        x_cfg_scale = kwargs.get('x_cond_scale', None) # [N,] or None
+        class_cfg_scale = kwargs.get('cfg_scale', torch.ones_like(s)) # [N,] or None
+        x_cfg_scale = kwargs.get('x_cond_scale', torch.ones_like(s)) # [N,] or None
 
         x_emb = self.x_embedder(x)
         x_cond_emb = self.x_cond_embedder(x_cond)
@@ -420,8 +420,7 @@ class DiTMFM(BaseModel):
         null_labels = torch.full((x.shape[0],), self.label_dim, dtype=torch.long, device=device)
         
         labels = torch.cat([null_labels, class_labels], dim=0)
-        v = model.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels,
-                    cfg_scale=torch.ones_like(s_2, device=device))
+        v = model.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels)
         v_uncond, v_cond = v.chunk(2, dim=0)
         if return_seperate:
             return v_uncond, v_cond
