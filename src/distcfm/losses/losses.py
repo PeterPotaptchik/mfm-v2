@@ -80,12 +80,8 @@ def get_consistency_loss_fn(cfg, SI):
         # Standard FM target
         dIsds = x1 - x0
         
-        # Model prediction
-        if cfg.loss.model_guidance:
-            fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels,
-                              cfg_scale=torch.ones_like(s_uniform, device=device))
-        else:
-            fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
+        # learn the base flow
+        fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels)
         
         if cfg.model.learn_loss_weighting:
             fm_loss_weighting = weighting_model(s_uniform, t_cond)
@@ -196,10 +192,10 @@ def get_consistency_loss_fn(cfg, SI):
                 else:
                     # get the guidance scales for distillation
                     with torch.no_grad():
-                        scales = torch.randint(0, len(cfg.model.model_guidance_class_ws), (N,))
-                        cfg_scale = torch.tensor([cfg.model.model_guidance_class_ws[i] for i in cfg_scale], device=device)
+                        rand_indices = torch.randint(0, len(cfg.model.model_guidance_class_ws), (N,))
+                        cfg_scale = torch.tensor([cfg.model.model_guidance_class_ws[i] for i in rand_indices], device=device)
                         p = cfg.loss.model_guidance_distill_base_prob
-                        cfg_mask = torch.bernoulli(torch.full(N, p, device=self.device)).bool()
+                        cfg_mask = torch.bernoulli(torch.full(N, p, device=device)).bool()
                         cfg_scales_distill = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
                         vss = model.v_cfg(s, s, Is, t_cond, xt_cond, class_labels=labels, cfg_scales=cfg_scales_distill)
                     
