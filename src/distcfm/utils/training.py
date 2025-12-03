@@ -208,9 +208,9 @@ class TrainingModule(pl.LightningModule):
 
         for name, loss in losses.items():
             if name == "distillation_loss":
-                total_loss += loss * self.cfg.loss.distillation_weight * self.distillation_loss_ratio_ema
+                total_loss += loss * self.cfg.loss.distillation_weight # * self.distillation_loss_ratio_ema
             elif name == "distill_fm_loss":
-                total_loss += loss * self.cfg.loss.distill_fm_weight * self.distill_fm_loss_ratio_ema
+                total_loss += loss * self.cfg.loss.distill_fm_weight # * self.distill_fm_loss_ratio_ema
             elif name == "fm_loss":
                 total_loss += loss * self.cfg.loss.fm_weight
             elif name == "model_guidance_loss":

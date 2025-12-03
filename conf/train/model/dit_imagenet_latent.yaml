@@ -22,5 +22,5 @@ label_dim: 1000
 use_joint_attention: false   # use joint spatial+channel attention
 
 # === model guidance ===
-model_guidance_class_ws: [1.0, 1.75]
-model_guidance_x_cond_ws: [1.0, 1.75]
+model_guidance_class_ws: [1.0]
+model_guidance_x_cond_ws: [1.0]
