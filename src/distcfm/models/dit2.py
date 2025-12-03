@@ -281,10 +281,10 @@ class DiT(nn.Module):
         # This gives shift=0, scale=-1.
         # modulate(x, shift, scale) = x * (1 + scale) + shift = x * 0 + 0 = 0.
         print("Initializing x_cond_adaLN to gate off x_cond (scale=-1)...")
-        nn.init.constant_(target_model.x_cond_adaLN[-1].weight, 0)
-        nn.init.constant_(target_model.x_cond_adaLN[-1].bias, 0)
-        half_dim = target_model.x_cond_adaLN[-1].bias.shape[0] // 2
-        nn.init.constant_(target_model.x_cond_adaLN[-1].bias[half_dim:], -1)
+        nn.init.constant_(self.x_cond_adaLN[-1].weight, 0)
+        nn.init.constant_(self.x_cond_adaLN[-1].bias, 0)
+        half_dim = self.x_cond_adaLN[-1].bias.shape[0] // 2
+        nn.init.constant_(self.x_cond_adaLN[-1].bias[half_dim:], -1)
 
         # Initialize DiTBlock specific components if joint attention is used
         for block in self.blocks:
