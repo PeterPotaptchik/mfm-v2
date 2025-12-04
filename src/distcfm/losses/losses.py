@@ -102,6 +102,8 @@ def get_consistency_loss_fn(cfg, SI):
             fm_loss_l2 = fm_loss_l2.mean()
 
         # Learn the amortized velocity field (w != 1) 
+        model_guidance_loss = torch.tensor(0.0, device=device)
+        model_guidance_loss_unweighted = torch.tensor(0.0, device=device)
         if cfg.loss.model_guidance:
             ws = cfg.model.model_guidance_class_ws 
             rand_indices = torch.randint(0, len(ws), (N,))
@@ -122,6 +124,7 @@ def get_consistency_loss_fn(cfg, SI):
         # Distilled FM Loss
         distill_fm_loss = torch.tensor(0.0, device=device)
         distill_fm_loss_unweighted = torch.tensor(0.0, device=device)
+        distill_fm_loss_l2 = torch.tensor(0.0, device=device)
 
         if cfg.loss.distill_fm:
             eps = 1e-6
@@ -152,19 +155,19 @@ def get_consistency_loss_fn(cfg, SI):
                 term1 = A_div_x * xt_cond + B_minus_1_div_x * Is
                 dIsds_distill = term1 + term2
             
-            # Calculate loss
-            distill_loss_weighting = torch.zeros_like(fm_pred)
-            distill_fm_loss, distill_fm_loss_unweighted = compute_loss(
-                fm_pred, dIsds_distill, distill_loss_weighting,
-                cfg.loss.distill_fm_loss_type,
-                adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
-                adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
-            )
-            # print(f"time_diff: {(t_star - s_uniform).mean().item():.4f}, x_diff: {(x_star-Is).mean().item():.4f}, v_diff: {(v_star-dIsds_distill).mean().item():.4f},  distill_fm_loss: {distill_fm_loss.item():.6f}")
+                # Calculate loss
+                distill_loss_weighting = torch.zeros_like(fm_pred)
+                distill_fm_loss, distill_fm_loss_unweighted = compute_loss(
+                    fm_pred, dIsds_distill, distill_loss_weighting,
+                    cfg.loss.distill_fm_loss_type,
+                    adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
+                    adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
+                )
+                # print(f"time_diff: {(t_star - s_uniform).mean().item():.4f}, x_diff: {(x_star-Is).mean().item():.4f}, v_diff: {(v_star-dIsds_distill).mean().item():.4f},  distill_fm_loss: {distill_fm_loss.item():.6f}")
         
-        with torch.no_grad():
-            distill_fm_loss_l2 = (fm_pred - dIsds_distill)**2
-            distill_fm_loss_l2 = distill_fm_loss_l2.mean()
+            with torch.no_grad():
+                distill_fm_loss_l2 = (fm_pred - dIsds_distill)**2
+                distill_fm_loss_l2 = distill_fm_loss_l2.mean()
 
         s, u = sample_s_u(N, step, cfg)  # [B,]
         s, u = s.to(device), u.to(device)
@@ -230,13 +233,15 @@ def get_consistency_loss_fn(cfg, SI):
                 adaptive_c=cfg.loss.get("distill_adaptive_loss_c"),
                 stop_gradient=cfg.loss.distill_teacher_stop_grad
             )
+
+            with torch.no_grad():
+                distillation_loss_l2 = (distillation_student - distillation_teacher)**2
+                distillation_loss_l2 = distillation_loss_l2.mean()
+
         else:
             distillation_loss = torch.tensor(0.0, device=device)
             distillation_loss_unweighted = torch.tensor(0.0, device=device)
-        
-        with torch.no_grad():
-            distillation_loss_l2 = (distillation_student - distillation_teacher)**2
-            distillation_loss_l2 = distillation_loss_l2.mean()
+            distillation_loss_l2 = torch.tensor(0.0, device=device)
 
         return {"fm_loss": fm_loss, "distill_fm_loss": distill_fm_loss, "distillation_loss": distillation_loss, "model_guidance_loss": model_guidance_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
                                                                                                                                                               "distill_fm_loss_unweighted": distill_fm_loss_unweighted,

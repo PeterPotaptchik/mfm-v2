@@ -106,7 +106,7 @@ srun bash -c '
     ++trainer.num_train_steps=500000 \
     ++trainer.batch_size=25 \
     ++trainer.num_workers=20 \
-    ++trainer.class_dropout_prob=0.0 \
+    ++trainer.class_dropout_prob=0.2 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
     ++loss.explicit_v00_train=false \
     ++trainer.anneal_end_step=10000 \
