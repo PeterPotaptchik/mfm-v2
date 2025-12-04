@@ -8,7 +8,7 @@ from distcfm.losses.utils import broadcast_to_shape
 @torch.no_grad()
 def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', 
                    eps_start=None, v_type="standard", labels=None, 
-                   cfg_scales=None, x_cond_scales=None):
+                   cfg_scales=None, x_cond_scale=None):
     if v_type == "standard":
         ode_func = lambda t, x: model.v(t.expand(x.shape[0],), 
                                         t.expand(x.shape[0],), 
@@ -19,7 +19,7 @@ def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler',
                                                 x, t_cond, xt_cond,
                                                 labels=labels, 
                                                 cfg_scales=cfg_scales,
-                                                x_cond_scales=x_cond_scales)
+                                                x_cond_scale=x_cond_scale)
     elif v_type == "cfg":
         ode_func = lambda t, x: model.v_cfg(t.expand(x.shape[0],), 
                                             t.expand(x.shape[0],), 
