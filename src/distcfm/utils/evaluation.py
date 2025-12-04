@@ -163,7 +163,7 @@ def posterior_sampling_fn(cfg,
                                   eps_start=eps_start,
                                   labels=labels,
                                   cfg_scales=kwargs.get("cfg_scale", None),
-                                  x_cond_scale=kwargs.get("x_cond_scale", None),
+                                  x_cond_scales=kwargs.get("x_cond_scale", None),
                                   v_type=kwargs.get("v_type", "standard"),)
         
     elif cfg.posterior_sampler == "distributional_diffusion":
