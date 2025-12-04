@@ -162,12 +162,12 @@ def posterior_sampling_fn(cfg,
                                   n_steps=cfg.ode.steps,
                                   eps_start=eps_start,
                                   labels=labels,
-                                  cfg_scales=kwargs.get("cfg_scale", None),
-                                  x_cond_scales=kwargs.get("x_cond_scale", None),
+                                  cfg_scales=kwargs.get("cfg_scales", None),
+                                  x_cond_scales=kwargs.get("x_cond_scales", None),
                                   v_type=kwargs.get("v_type", "standard"),)
         
     elif cfg.posterior_sampler == "distributional_diffusion":
-        noise_population = torch.randn_like(xt_cond, device=xt_cond_batched.device)
+        noise_population = torch.randn_like(xt_cond, device=xt_cond.device)
         x_sample = model(xt_cond, t_cond, noise_population)
     else:
         raise ValueError(f"Unknown posterior sampler: {cfg.posterior_sampler}")
