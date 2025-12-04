@@ -17,14 +17,14 @@ def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler',
         ode_func = lambda t, x: model.v_cfg_mfm(t.expand(x.shape[0],), 
                                                 t.expand(x.shape[0],), 
                                                 x, t_cond, xt_cond,
-                                                labels=labels, 
+                                                class_labels=labels, 
                                                 cfg_scales=cfg_scales,
                                                 x_cond_scales=x_cond_scales)
     elif v_type == "cfg":
         ode_func = lambda t, x: model.v_cfg(t.expand(x.shape[0],), 
                                             t.expand(x.shape[0],), 
                                             x, t_cond, xt_cond,
-                                            labels=labels, 
+                                            class_labels=labels, 
                                             cfg_scales=cfg_scales)
     else:
         raise ValueError(f"Unknown velocity: {v_type}")
