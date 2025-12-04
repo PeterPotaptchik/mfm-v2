@@ -39,6 +39,18 @@ class SIModelWrapper(BaseModel):
                 return v
         else:
             return self.model.v(s, u, x, t_cond, x_cond, **kwargs)
+        
+    def v_cfg(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, **kwargs):
+        if self.use_parametrization:
+            raise NotImplementedError
+        else:
+            return self.model.v_cfg(s, t, x, t_cond, x_cond, class_labels, cfg_scales, **kwargs)
+    
+    def v_cfg_mfm(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, x_cond_scales):
+        if self.use_parametrization:
+            raise NotImplementedError
+        else:
+            return self.model.v_cfg_mfm(s, t, x, t_cond, x_cond, class_labels, cfg_scales, x_cond_scales)
 
     def pop_gate_stats(self):
         fn = getattr(self.model, "pop_gate_stats", None)
