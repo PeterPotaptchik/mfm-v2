@@ -5,6 +5,7 @@ from torchdiffeq import odeint
 
 from distcfm.losses.utils import broadcast_to_shape
 
+# both below have stochasticity seeded in initial noise
 @torch.no_grad()
 def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', 
                    eps_start=None, v_type="standard", labels=None, 
@@ -59,11 +60,18 @@ def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None, la
         sampling_hist[i + 1] = xu
     return sampling_hist[-1]
 
+# stochastic sampler due to noise at each step
 def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                       n_batch_size, n_steps=1,
                       inverse_scaler_fn=lambda x: (x+1)/2,
-                      x0=None):
+                      x0=None,     
+                      generator: torch.Generator | None = None,):
     device = next(model.parameters()).device
+
+    if generator is not None and generator.device != device:
+        generator = generator.manual_seed(generator.seed())  # keep seed, just new device
+        generator = torch.Generator(device=device).set_state(generator.get_state())
+
     samples = torch.zeros((n_samples, *shape_decoded), device=device)
     timesteps = torch.linspace(0.0, SI.t_max, n_steps + 1, device=device) 
     num_batches = math.ceil(n_samples / n_batch_size)
@@ -77,7 +85,7 @@ def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
             if x0 is not None:
                 xs = x0[start:end] 
             else:
-                xs = torch.randn((cur_bs, *shape), device=device)
+                xs = torch.randn((cur_bs, *shape), device=device, generator=generator)
             
             t_zeros = torch.zeros((cur_bs,), device=device)
             t_ones = torch.ones((cur_bs,), device=device)
@@ -88,9 +96,9 @@ def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                 
                 s_batch = torch.full((cur_bs,), s, device=device)
                 
-                eps_start = torch.randn_like(xs)
+                eps_start = torch.randn_like(xs, device=device, generator=generator)
                 x1 = model(t_zeros, t_ones, eps_start, s_batch, xs)
-                noise = torch.randn_like(xs)
+                noise = torch.randn_like(xs, device=device, generator=generator)
 
                 alpha_u, beta_u = SI.get_coefficients(u) 
                 alpha_u, beta_u = broadcast_to_shape(alpha_u, x1.shape), broadcast_to_shape(beta_u, x1.shape)

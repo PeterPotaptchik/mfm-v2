@@ -457,13 +457,16 @@ class SamplingCallback(Callback):
     def _run_distributed_sampling(self, pl_module, trainer):
         device = pl_module.device
 
+        all_indices = torch.arange(self.cfg.sampling.n_unconditional_samples, device=device)
         for n_steps in self.cfg.sampling.n_kernel_steps:
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                all_indices = torch.arange(self.cfg.sampling.n_unconditional_samples, device=device)
                 device_indices = all_indices[self.rank::self.world_size]
                 unconditional_noise_device = self.shared_unconditional_noise[device_indices]
+                # different seed per device (but fixed across runs)
+                generator = torch.Generator(device=device).manual_seed(self.cfg.sampling.seed + self.rank)
+        
                 unconditional_samples_kernel = kernel_sampler_fn(
-                    pl_module.model,
+                        pl_module.model,
                         shape=self.image_shape,
                         shape_decoded=self.image_shape, # Return latents if VAE
                         SI=self.SI,
@@ -471,7 +474,8 @@ class SamplingCallback(Callback):
                         n_batch_size=self.cfg.sampling.batch_size,
                         n_steps=n_steps,
                         inverse_scaler_fn=lambda x: x,
-                        x0=unconditional_noise_device
+                        x0=unconditional_noise_device,
+                        generator=generator,
                     )
             
             unconditional_samples_kernel = self._decode_if_needed(pl_module, unconditional_samples_kernel, vae_batch_size=self.cfg.sampling.vae_batch_size)
@@ -495,7 +499,7 @@ class SamplingCallback(Callback):
         device_indices_init = all_indices[self.rank::self.world_size]
         shared_posterior_device = self.shared_posterior_noise[device_indices_init]
         
-        # unconditional sampling
+        # Posterior sampling
         for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 ode_x_t, ode_x_1 = self._sample_batch(
@@ -547,26 +551,46 @@ class SamplingCallback(Callback):
                 if trainer.is_global_zero:
                     self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}", steps=None)
         
-        # CFG on class + x_cond 
-        for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
-            for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):
-                for x_cond_scale in tqdm.tqdm(self.cfg.sampling.x_cond_scales, desc="Sampling different cfg scales"):
-                    
+        # CFG with shuffled labels
+        if self.cfg.sampling.sample_shuffed_cfg_labels:
+            shuffled_labels_device = labels_device[torch.randperm(labels_device.size(0))]
+            for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+                for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                         ode_x_t, ode_x_1 = self._sample_batch(pl_module, t_cond, self.cfg.ode_sampling_cfg, 
-                                                              data_device, shared_noise_device, shared_posterior_device,
-                                                              labels=labels_device, cfg_scale=cfg_scale, x_cond_scale=x_cond_scale,
-                                                              v_type="cfg_mfm")
+                                                            data_device, shared_noise_device, shared_posterior_device,
+                                                            labels=shuffled_labels_device, cfg_scale=cfg_scale, v_type="cfg")
 
-                    ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
-                    ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
+                        ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
+                        ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
 
                     ode_x_t = self._gather_across_devices(ode_x_t, device_indices, trainer)
                     ode_x_1 = self._gather_across_devices(ode_x_1, device_indices, trainer)
 
                     if trainer.is_global_zero:
-                        self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}_mg_{x_cond_scale}", steps=None)
-    
+                        self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_shuffled_cfg_{cfg_scale}", steps=None)
+        
+        # CFG with conditioning on class and x_cond 
+        if self.cfg.sampling.sample_mfm_cfg:
+            for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
+                for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):
+                    for x_cond_scale in tqdm.tqdm(self.cfg.sampling.x_cond_scales, desc="Sampling different cfg scales"):
+                        
+                        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                            ode_x_t, ode_x_1 = self._sample_batch(pl_module, t_cond, self.cfg.ode_sampling_cfg, 
+                                                                data_device, shared_noise_device, shared_posterior_device,
+                                                                labels=labels_device, cfg_scale=cfg_scale, x_cond_scale=x_cond_scale,
+                                                                v_type="cfg_mfm")
+
+                        ode_x_t = self._decode_if_needed(pl_module, ode_x_t, vae_batch_size=self.cfg.sampling.vae_batch_size)
+                        ode_x_1 = self._decode_if_needed(pl_module, ode_x_1, vae_batch_size=self.cfg.sampling.vae_batch_size)
+
+                        ode_x_t = self._gather_across_devices(ode_x_t, device_indices, trainer)
+                        ode_x_1 = self._gather_across_devices(ode_x_1, device_indices, trainer)
+
+                        if trainer.is_global_zero:
+                            self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}_mg_{x_cond_scale}", steps=None)
+        
     def _sample_batch(self, pl_module, t_cond, sampling_cfg, x1, noise_data, noise_start, labels=None, cfg_scale=None, x_cond_scale=None, **kwargs):
         x_t_list, x_1_list = [], []
         N_local = x1.shape[0]
