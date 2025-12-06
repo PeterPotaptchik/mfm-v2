@@ -154,7 +154,8 @@ def posterior_sampling_fn(cfg,
                                           t_cond=t_cond, 
                                           n_steps=cfg.consistency.steps, 
                                           eps_start=eps_start,
-                                          labels=labels,)
+                                          class_labels=labels,
+                                          cfg_scale=kwargs.get("cfg_scales", None),)
     elif cfg.posterior_sampler == "ode":
         x_sample = ode_sampler_fn(model,
                                   xt_cond,

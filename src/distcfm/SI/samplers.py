@@ -5,7 +5,6 @@ from torchdiffeq import odeint
 
 from distcfm.losses.utils import broadcast_to_shape
 
-# both below have stochasticity seeded in initial noise
 @torch.no_grad()
 def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler', 
                    eps_start=None, v_type="standard", labels=None, 
@@ -14,6 +13,12 @@ def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler',
         ode_func = lambda t, x: model.v(t.expand(x.shape[0],), 
                                         t.expand(x.shape[0],), 
                                         x, t_cond, xt_cond)
+    elif v_type == "model_guidance_class":
+        ode_func = lambda t, x: model.v(t.expand(x.shape[0],), 
+                                        t.expand(x.shape[0],), 
+                                        x, t_cond, xt_cond,
+                                        class_labels=labels,
+                                        cfg_scale=cfg_scales)
     elif v_type == "cfg_mfm":
         ode_func = lambda t, x: model.v_cfg_mfm(t.expand(x.shape[0],), 
                                                 t.expand(x.shape[0],), 
@@ -38,7 +43,8 @@ def ode_sampler_fn(model, xt_cond, t_cond, n_steps=100, solver='euler',
     sampling_hist = odeint(ode_func, eps_start, times, method=solver, atol=1e-5, rtol=1e-5)  # Last time point
     return sampling_hist[-1]
 
-def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None, labels=None):
+# pass in class_labels, cfg_scale in kwargs
+def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None, **kwargs):
     if eps_start is None:
         eps_start = torch.randn_like(xt_cond) # [B, C, H, W]
     else:
@@ -55,17 +61,18 @@ def consistency_sampler_fn(model, xt_cond, t_cond, n_steps=1, eps_start=None, la
         xs = sampling_hist[i]
         s = s.repeat(xs.shape[0],)
         u = u.repeat(xs.shape[0],)
-        vsu = model.v(s, u, xs, t_cond, xt_cond)
+        vsu = model.v(s, u, xs, t_cond, xt_cond, **kwargs)
         xu = model.X(s, u, xs, vsu)
         sampling_hist[i + 1] = xu
     return sampling_hist[-1]
 
-# stochastic sampler due to noise at each step
 def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                       n_batch_size, n_steps=1,
                       inverse_scaler_fn=lambda x: (x+1)/2,
                       x0=None,     
-                      generator: torch.Generator | None = None,):
+                      generator: torch.Generator | None = None,
+                      class_labels=None,
+                      cfg_scale=None,):
     device = next(model.parameters()).device
 
     if generator is not None and generator.device != device:
@@ -90,6 +97,11 @@ def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
             t_zeros = torch.zeros((cur_bs,), device=device)
             t_ones = torch.ones((cur_bs,), device=device)
             
+            if class_labels is not None:
+                kwargs = {'class_labels': class_labels[start:end], 'cfg_scale': torch.full((cur_bs,), cfg_scale, device=device)}
+            else:
+                kwargs = {}
+            
             for j in range(len(timesteps) - 1):
                 s = timesteps[j]
                 u = timesteps[j + 1]
@@ -97,7 +109,7 @@ def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                 s_batch = torch.full((cur_bs,), s, device=device)
 
                 eps_start = torch.randn(xs.shape, device=device, dtype=xs.dtype, generator=generator)
-                x1 = model(t_zeros, t_ones, eps_start, s_batch, xs)
+                x1 = model(t_zeros, t_ones, eps_start, s_batch, xs, **kwargs)
                 noise = torch.randn(xs.shape, device=device, dtype=xs.dtype, generator=generator)
 
                 alpha_u, beta_u = SI.get_coefficients(u) 
