@@ -95,10 +95,10 @@ def kernel_sampler_fn(model, shape, shape_decoded, SI, n_samples,
                 u = timesteps[j + 1]
                 
                 s_batch = torch.full((cur_bs,), s, device=device)
-                
-                eps_start = torch.randn_like(xs, device=device, generator=generator)
+
+                eps_start = torch.randn(xs.shape, device=device, dtype=xs.dtype, generator=generator)
                 x1 = model(t_zeros, t_ones, eps_start, s_batch, xs)
-                noise = torch.randn_like(xs, device=device, generator=generator)
+                noise = torch.randn(xs.shape, device=device, dtype=xs.dtype, generator=generator)
 
                 alpha_u, beta_u = SI.get_coefficients(u) 
                 alpha_u, beta_u = broadcast_to_shape(alpha_u, x1.shape), broadcast_to_shape(beta_u, x1.shape)
