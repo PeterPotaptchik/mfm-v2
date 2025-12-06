@@ -28,7 +28,8 @@ loss:
   distill_fm: false
   distill_fm_loss_type: l2
   model_guidance: false
-  model_guidance_distill_base_prob: 0.5
+  model_guidance_distill_base_prob: 0.2
+  model_guidance_fm_base_prob: 0.2
 
 weighting_model:
   _target_: distcfm.models.base_model.LossWeightingNetwork

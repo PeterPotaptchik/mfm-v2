@@ -22,6 +22,8 @@ from distcfm.models.base_model import BaseModel
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+def broadcast_to_shape(tensor, shape):
+    return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
@@ -202,8 +204,8 @@ class DiT(nn.Module):
         encoder_depth=8,
         qk_norm=False,
         use_joint_attention=False,
-        model_guidance_class_ws=[1.0],
-        model_guidance_x_cond_ws=[1.0],
+        model_guidance_class_ws=[],
+        model_guidance_x_cond_ws=[],
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -231,6 +233,8 @@ class DiT(nn.Module):
         self.y_embedder = LabelEmbedder(label_dim, hidden_size)
 
         # Initialise guidance scale embedding
+        model_guidance_class_ws = [1.0] + list(model_guidance_class_ws)
+        model_guidance_x_cond_ws = [1.0] + list(model_guidance_x_cond_ws)
         self.guidance_embedder = GuidanceEmbedderJoint(hidden_size, model_guidance_class_ws, model_guidance_x_cond_ws)
 
         num_patches = self.x_embedder.num_patches
@@ -351,6 +355,8 @@ class DiT(nn.Module):
         # for amortized classifier-free guidance
         class_cfg_scale = kwargs.get('cfg_scale', torch.ones_like(s)) # [N,] or None
         x_cfg_scale = kwargs.get('x_cond_scale', torch.ones_like(s)) # [N,] or None
+        assert kwargs.get('cfg_scales', None) is None, "wrong argument name for cfg scales"
+        assert kwargs.get('x_cond_scales', None) is None, "wrong argument name for x cond scales"
 
         x_emb = self.x_embedder(x)
         x_cond_emb = self.x_cond_embedder(x_cond)
@@ -367,9 +373,8 @@ class DiT(nn.Module):
         c = s_first + t_first + t_cond + y               # (N, D)
         
         # model guidance for MFM
-        if class_cfg_scale is not None and x_cfg_scale is not None:
-            guidance_emb = self.guidance_embedder(class_cfg_scale, x_cfg_scale)  # (N, D)
-            c = c + guidance_emb
+        guidance_emb = self.guidance_embedder(class_cfg_scale, x_cfg_scale)  # (N, D)
+        c = c + guidance_emb
 
         for i, block in enumerate(self.blocks[:20]):
             x = block(x, x_cond, c)                           # (N, T, D)
@@ -420,7 +425,7 @@ class DiTMFM(BaseModel):
         null_labels = torch.full((x.shape[0],), self.label_dim, dtype=torch.long, device=device)
         
         labels = torch.cat([null_labels, class_labels], dim=0)
-        v = model.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels)
+        v = self.v(s_2, t_2, x_2, t_cond_2, x_cond_2, class_labels=labels)
         v_uncond, v_cond = v.chunk(2, dim=0)
         if return_seperate:
             return v_uncond, v_cond
