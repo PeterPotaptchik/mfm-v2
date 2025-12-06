@@ -463,7 +463,7 @@ class SamplingCallback(Callback):
                 device_indices = all_indices[self.rank::self.world_size]
                 unconditional_noise_device = self.shared_unconditional_noise[device_indices]
                 # different seed per device (but fixed across runs)
-                generator = torch.Generator(device=device).manual_seed(self.cfg.sampling.seed + self.rank)
+                generator = torch.Generator(device=device).manual_seed(self.cfg.seed + self.rank)
         
                 unconditional_samples_kernel = kernel_sampler_fn(
                         pl_module.model,
