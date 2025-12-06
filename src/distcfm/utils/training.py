@@ -552,7 +552,7 @@ class SamplingCallback(Callback):
                     self._save_samples(pl_module, ode_x_t, ode_x_1, t_cond, f"ode_cfg_{cfg_scale}", steps=None)
         
         # CFG with shuffled labels
-        if self.cfg.sampling.sample_shuffed_cfg_labels:
+        if self.cfg.sampling.sample_shuffled_cfg_labels:
             shuffled_labels_device = labels_device[torch.randperm(labels_device.size(0))]
             for t_cond in tqdm.tqdm(self.cfg.sampling.conditioning_times, desc="Sampling posteriors at different t"):
                 for cfg_scale in tqdm.tqdm(self.cfg.sampling.cfg_scales, desc="Sampling different cfg scales"):

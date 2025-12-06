@@ -85,7 +85,7 @@ sampling:
   - 1.5
   - 2.0
   - 3.0
-  sample_shuffed_cfg_labels: true
+  sample_shuffled_cfg_labels: true
   sample_mfm_cfg: false
 
 ode_sampling_cfg:
