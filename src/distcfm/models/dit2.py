@@ -354,7 +354,11 @@ class DiT(nn.Module):
         
         # for amortized classifier-free guidance
         class_cfg_scale = kwargs.get('cfg_scale', torch.ones_like(s)) # [N,] or None
+        if class_cfg_scale is None:
+            class_cfg_scale = torch.ones_like(s)
         x_cfg_scale = kwargs.get('x_cond_scale', torch.ones_like(s)) # [N,] or None
+        if x_cfg_scale is None:
+            x_cfg_scale = torch.ones_like(s)
         assert kwargs.get('cfg_scales', None) is None, "wrong argument name for cfg scales"
         assert kwargs.get('x_cond_scales', None) is None, "wrong argument name for x cond scales"
 
