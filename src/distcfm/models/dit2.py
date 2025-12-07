@@ -81,44 +81,26 @@ class LabelEmbedder(nn.Module):
         return self.embedding_table(labels)
 
 class GuidanceEmbedderJoint(nn.Module):
-    def __init__(self, d, class_ws_set, x_cond_ws_set, round_decimals=4):
+    def __init__(self, d, class_ws_set, x_cond_ws_set):
         super().__init__()
         self.class_ws_set = list(class_ws_set)
         self.x_cond_ws_set = list(x_cond_ws_set)
         n_class_ws = len(self.class_ws_set)
         n_x_cond_ws = len(self.x_cond_ws_set)
         self.embedding_table = nn.Embedding(n_class_ws * n_x_cond_ws, d)
-        
-        # for indexing 
-        self.round_decimals = round_decimals
-        self.class2idx = {
-            round(float(v), self.round_decimals): i
-            for i, v in enumerate(self.class_ws_set)
-        }
-        self.xcond2idx = {
-            round(float(v), self.round_decimals): j
-            for j, v in enumerate(self.x_cond_ws_set)
-        }
-
-    def _map_ws_to_idx(self, ws, mapping):
-        flat = ws.view(-1).tolist()
-        idx_list = []
-        for v in flat:
-            key = round(float(v), self.round_decimals)
-            if key not in mapping:
-                raise ValueError(
-                    f"Got ws={v} (rounded={key}), which is not in allowed set {list(mapping.keys())}"
-                )
-            idx_list.append(mapping[key])
-
-        return torch.tensor(idx_list, dtype=torch.long, device=ws.device)
 
     def forward(self, class_ws, x_cond_ws):
-        class_ws = class_ws.view(-1).float()
-        x_cond_ws = x_cond_ws.view(-1).float()
-
-        class_idx = self._map_ws_to_idx(class_ws, self.class2idx)   # (B,)
-        xcond_idx = self._map_ws_to_idx(x_cond_ws, self.xcond2idx)  # (B,)
+        class_ws = class_ws.reshape(-1, 1).float() # (B, 1)
+        x_cond_ws = x_cond_ws.reshape(-1, 1).float() # (B, 1)
+        # create tensors of ws sets
+        class_ws_set = torch.tensor(self.class_ws_set, device=class_ws.device).view(1, -1) # (1, n_class_ws)
+        x_cond_ws_set = torch.tensor(self.x_cond_ws_set, device=x_cond_ws.device).view(1, -1) # (1, n_x_cond_ws)
+        # get indices by argmin of absolute difference
+        class_diff = torch.abs(class_ws - class_ws_set) # (B, n_class_ws)
+        x_cond_diff = torch.abs(x_cond_ws - x_cond_ws_set) # (B, n_x_cond_ws)
+        class_idx = torch.argmin(class_diff, dim=1) # (B,)
+        xcond_idx = torch.argmin(x_cond_diff, dim=1) # (B,)
+        # get combined index
         n_x = len(self.x_cond_ws_set)
         combined_indices = class_idx * n_x + xcond_idx              # (B,)
         return self.embedding_table(combined_indices)   
