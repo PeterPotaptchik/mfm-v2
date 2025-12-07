@@ -253,12 +253,6 @@ def main(cfg: DictConfig):
         every_n_train_steps=cfg.trainer.get("checkpoint_every_n_steps", 10000),
         save_top_k=-1,
     )
-    best_checkpoint = ModelCheckpoint(
-        monitor="val_ema/total_loss",
-        dirpath=f"{log_dir}/checkpoints",
-        save_top_k=1,
-        mode="min",
-    )
 
     # Enable progress bar only for rank 0 in distributed training
     enable_progress_bar = True
@@ -272,7 +266,7 @@ def main(cfg: DictConfig):
         devices=cfg.trainer.devices,
         num_nodes=cfg.trainer.get("num_nodes", 1),
         log_every_n_steps=cfg.trainer.log_every_n_steps,
-        callbacks=[ema_callback, sampling_callback, periodic_checkpoint, best_checkpoint],
+        callbacks=[ema_callback, sampling_callback, periodic_checkpoint],
         strategy=DDPStrategy(find_unused_parameters=False),
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
         precision=cfg.trainer.precision,
