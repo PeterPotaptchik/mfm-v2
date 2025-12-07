@@ -220,4 +220,4 @@ saved_models/
 .git_corrupt_backup_20251116/
 decoded_latents.png
 decoded_pairs.png
-checkpoints/
+ckpt/

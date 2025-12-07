@@ -25,7 +25,8 @@ dependencies = [
   "timm",
   "torchmetrics",
   "transformers",
-  "image-reward"
+  "image-reward",
+  "pytest"
 ]
 
 [build-system]

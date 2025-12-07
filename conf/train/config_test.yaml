@@ -65,11 +65,18 @@ trainer:
 
 sampling:
   every_n_steps: 10000
-  batch_size: 4
-  vae_batch_size: 64
-  n_conditioning_samples: 32
-  n_samples_per_image: 4
-  n_unconditional_samples: 128
+  n_unconditional_samples: 128 # total unconditional samples
+  n_conditioning_samples: 32 # unique x_t
+  n_samples_per_image: 4 # total_posterior_samples = n_conditioning_samples * n_samples_per_image
+  max_batch_size: 32
+  vae_batch_size: 32
+  ode_sampler:
+    steps: 100
+  consistency_sampler:
+    steps_to_test: 
+    - 1
+    - 4
+  sample_shuffled_cfg_labels: true
   conditioning_times:
   - 0.00
   - 0.20
@@ -83,31 +90,14 @@ sampling:
   - 2.0
   kernel_churn: 0.0
   cfg_scales: # for posterior sampling (ODE/consistency) 
-  - 1.5
-  - 1.75
-  - 2.0
-  x_cond_scales: # ignore
+  - 1.0
   - 1.5
   - 2.0
-  - 3.0
-  sample_shuffled_cfg_labels: true
-
-ode_sampling_cfg:
-  posterior_sampler: ode
-  ode:
-    steps: 100
-
-consistency_sampling_cfg:
-  posterior_sampler: consistency
-  consistency:
-    steps: 1
-  steps_to_test:
-  - 1
-  - 4
-
+  
 wandb:
   project: ablations
   entity: distcfm
   name: default
 
 data_dir: /vols/bitbucket/saravanan/distributional-mf/data
+init_weights_ckpt: /n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/ckpt/dmf_xl_2_256.pt

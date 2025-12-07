@@ -24,3 +24,4 @@ use_joint_attention: false   # use joint spatial+channel attention
 # === model guidance === - don't include 1.0 here!
 model_guidance_class_ws: [1.5, 1.75, 2.0]
 model_guidance_x_cond_ws: []
+attn_func: "fa3"

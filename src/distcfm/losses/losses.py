@@ -54,9 +54,6 @@ def broadcast_to_shape(tensor, shape):
 
 def get_consistency_loss_fn(cfg, SI):
     def loss_fn(model, weighting_model, x1, labels, step, ema_state=None, teacher_model=None, null_labels=None):
-        if cfg.loss.model_guidance and cfg.loss.distillation_type != "mf":
-            raise ValueError("Model guidance is only supported with MF distillation.")
-
         # --- 1. Generate Conditioning Variables ---
         device = x1.device
         N = x1.shape[0]  # batch size
@@ -85,7 +82,7 @@ def get_consistency_loss_fn(cfg, SI):
             ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
             cfg_scale = ws[torch.randint(len(ws), (N,), device=device)]
             p = cfg.loss.model_guidance_fm_base_prob
-            cfg_mask = torch.bernoulli(torch.full(N, p, device=device)).bool()
+            cfg_mask = torch.bernoulli(torch.full((N,), p, device=device)).bool()
             cfg_scales_fm = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
             with torch.no_grad():
                 fm_cfg_target = model.v_cfg(s_uniform, s_uniform, Is, t_cond, xt_cond, 
@@ -177,7 +174,7 @@ def get_consistency_loss_fn(cfg, SI):
                 ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
                 cfg_scale = ws[torch.randint(len(ws), (N,), device=device)]
                 p = cfg.loss.model_guidance_distill_base_prob
-                cfg_mask = torch.bernoulli(torch.full(N, p, device=device)).bool()
+                cfg_mask = torch.bernoulli(torch.full((N,), p, device=device)).bool()
                 cfg_scales_distill = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
             else:
                 cfg_scales_distill = torch.ones(N, device=device)

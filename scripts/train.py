@@ -181,10 +181,7 @@ def main(cfg: DictConfig):
     train_module = TrainingModule(cfg, model, weighting_model, loss_fn, SI)
 
     if cfg.get("init_from_sit"):
-        # sit_ckpt_path = download_sit_checkpoint()
-        # print(f"Loading SiT checkpoint from {sit_ckpt_path}")
-        # sit_ckpt = torch.load(sit_ckpt_path, map_location="cpu")
-        sit_ckpt = torch.load("/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/ckpt/dmf_xl_2_256.pt", map_location="cpu", weights_only=False)
+        sit_ckpt = torch.load(cfg.init_weights_ckpt, map_location="cpu", weights_only=False)
         
         if "ema" in sit_ckpt:
             print("Loading from EMA weights in SiT checkpoint")

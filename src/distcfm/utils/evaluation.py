@@ -138,8 +138,7 @@ def load_model(model, checkpoint):
 def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
-def posterior_sampling_fn(cfg, 
-                          model, 
+def posterior_sampling_fn(model, 
                           xt_cond, # [B*N, C, H, W],
                           t_cond, # [B*N, 1]
                           n_samples_per_image=4,
@@ -148,31 +147,31 @@ def posterior_sampling_fn(cfg,
                           labels=None,
                           **kwargs):
     """Sample from the posterior distribution using the model."""
-    if cfg.posterior_sampler == "consistency":
+    posterior_sampler = kwargs.get("posterior_sampler", "consistency")
+    if posterior_sampler == "consistency":
         x_sample = consistency_sampler_fn(model,
                                           xt_cond, 
                                           t_cond=t_cond, 
-                                          n_steps=cfg.consistency.steps, 
+                                          n_steps=kwargs.get("n_steps", 1), 
                                           eps_start=eps_start,
                                           class_labels=labels,
                                           cfg_scale=kwargs.get("cfg_scales", None),)
-    elif cfg.posterior_sampler == "ode":
+    elif posterior_sampler == "ode":
         x_sample = ode_sampler_fn(model,
                                   xt_cond,
                                   t_cond=t_cond,
-                                  n_steps=cfg.ode.steps,
+                                  n_steps=kwargs.get("n_steps", 100),
                                   eps_start=eps_start,
                                   labels=labels,
                                   cfg_scales=kwargs.get("cfg_scales", None),
                                   x_cond_scales=kwargs.get("x_cond_scales", None),
                                   v_type=kwargs.get("v_type", "standard"),)
         
-    elif cfg.posterior_sampler == "distributional_diffusion":
+    elif posterior_sampler == "distributional_diffusion":
         noise_population = torch.randn_like(xt_cond, device=xt_cond.device)
         x_sample = model(xt_cond, t_cond, noise_population)
     else:
-        raise ValueError(f"Unknown posterior sampler: {cfg.posterior_sampler}")
-
+        raise ValueError(f"Unknown posterior sampler: {posterior_sampler}")
     x_sample = x_sample.view(-1, n_samples_per_image, *x_sample.shape[1:])  # [B, N, C, H, W]
     # [B, C, H, W], # [B, N, C, H, W]
     return inverse_scaler(xt_cond), inverse_scaler(x_sample)

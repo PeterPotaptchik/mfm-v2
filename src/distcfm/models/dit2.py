@@ -113,7 +113,7 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, use_joint_attention=False, input_size=None, patch_size=None, in_channels=None, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, use_joint_attention=False, input_size=None, patch_size=None, in_channels=None, attn_func="fa3", **block_kwargs):
         super().__init__()
         self.use_joint_attention = use_joint_attention
         if use_joint_attention:
@@ -121,10 +121,10 @@ class DiTBlock(nn.Module):
             num_patches = self.x_cond_embedder.num_patches
             # Will use fixed sin-cos embedding:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
-            self.joint_attn = JointAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+            self.joint_attn = JointAttention(hidden_size, num_heads=num_heads, qkv_bias=True, attn_func=attn_func, **block_kwargs)
             self.modulation_size = 7
         else:
-            self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+            self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, attn_func=attn_func, **block_kwargs)
             self.modulation_size = 6
 
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -188,6 +188,7 @@ class DiT(nn.Module):
         use_joint_attention=False,
         model_guidance_class_ws=[],
         model_guidance_x_cond_ws=[],
+        attn_func="fa3",
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -224,7 +225,7 @@ class DiT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
         
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm, use_joint_attention=use_joint_attention, input_size=input_size, patch_size=patch_size, in_channels=in_channels) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, qk_norm=qk_norm, use_joint_attention=use_joint_attention, input_size=input_size, patch_size=patch_size, in_channels=in_channels, attn_func=attn_func) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
