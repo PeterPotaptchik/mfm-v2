@@ -221,3 +221,4 @@ saved_models/
 decoded_latents.png
 decoded_pairs.png
 ckpt/
+.vscode/
