@@ -73,12 +73,10 @@ sampling:
   conditioning_times:
   - 0.00
   - 0.20
-  - 0.30
   - 0.40
   n_kernel_steps: 
   - 1
   - 5
-  - 10
   kernel_cfg_scales: # for unconditional sampling (kernel)
   - 1.0
   - 1.5
