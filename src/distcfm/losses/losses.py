@@ -53,7 +53,7 @@ def broadcast_to_shape(tensor, shape):
     return tensor.view(-1, *((1,) * (len(shape) - 1)))
 
 def get_consistency_loss_fn(cfg, SI):
-    def loss_fn(model, weighting_model, x1, labels, step, ema_state=None, teacher_model=None, null_labels=None):
+    def loss_fn(model, weighting_model, x1, labels, step, teacher_model=None):
         # --- 1. Generate Conditioning Variables ---
         device = x1.device
         N = x1.shape[0]  # batch size
@@ -200,14 +200,14 @@ def get_consistency_loss_fn(cfg, SI):
                 distillation_teacher = vss + broadcast_to_shape(u-s, jvp.shape) * jvp
             elif cfg.loss.distillation_type == "psd": 
                 vsu_fn = lambda s, u, x: model.v(s, u, x, t_cond, xt_cond, class_labels=labels, cfg_scale=cfg_scales_distill)
-                
+                distillation_student = vsu_fn(s, u, Is)
+            
                 with torch.no_grad():
                     gamma = torch.rand_like(s, device=device)
                     w = s + gamma * (u - s)
                     vsw = model.v(s, w, Is, t_cond, xt_cond, class_labels=labels, cfg_scale=cfg_scales_distill)
                     Xsw = model.X(s, w, Is, vsw)
-
-                distillation_student = vsu_fn(s, u, Is)
+   
                 expanded_gamma = broadcast_to_shape(gamma, x1.shape)
                 distillation_teacher = expanded_gamma * vsw + (1-expanded_gamma) * vsu_fn(w, u, Xsw)
             else:
