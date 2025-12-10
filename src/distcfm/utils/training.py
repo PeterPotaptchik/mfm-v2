@@ -61,10 +61,6 @@ class TrainingModule(pl.LightningModule):
         if self.cfg.model.label_dim > 0 and self.cfg.trainer.class_dropout_prob > 0:
             self.register_buffer("null_class_token", torch.tensor([self.cfg.model.label_dim]))
 
-        # Initialize EMAs for loss balancing
-        self.register_buffer("distill_fm_loss_ratio_ema", torch.tensor(1.0))
-        self.register_buffer("distillation_loss_ratio_ema", torch.tensor(1.0))
-
         self._freeze_step = self.cfg.trainer.get("freeze_main_until_step", 0)
         self._is_main_frozen = False
         if self._freeze_step > 0:
@@ -191,31 +187,17 @@ class TrainingModule(pl.LightningModule):
 
         total_loss = 0
         
-        # Update loss ratios
-        if "fm_loss" in losses and losses["fm_loss"] > 0:
-            fm_val = losses["fm_loss"].detach()
-            
-            if "distill_fm_loss" in losses and losses["distill_fm_loss"] > 0:
-                ratio = fm_val / (losses["distill_fm_loss"].detach() + 1e-8)
-                self.distill_fm_loss_ratio_ema = 0.99 * self.distill_fm_loss_ratio_ema + 0.01 * ratio
-                
-            if "distillation_loss" in losses and losses["distillation_loss"] > 0:
-                ratio = fm_val / (losses["distillation_loss"].detach() + 1e-8)
-                self.distillation_loss_ratio_ema = 0.99 * self.distillation_loss_ratio_ema + 0.01 * ratio
-
         for name, loss in losses.items():
             if name == "distillation_loss":
-                total_loss += loss * self.cfg.loss.distillation_weight * self.distillation_loss_ratio_ema
+                total_loss += loss * self.cfg.loss.distillation_weight
             elif name == "distill_fm_loss":
-                total_loss += loss * self.cfg.loss.distill_fm_weight * self.distill_fm_loss_ratio_ema
+                total_loss += loss * self.cfg.loss.distill_fm_weight
             elif name == "fm_loss":
                 total_loss += loss * self.cfg.loss.fm_weight
             else:
                 total_loss += loss
 
         self.log("train/total_loss", total_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        self.log("train/distill_fm_loss_ratio_ema", self.distill_fm_loss_ratio_ema, on_step=True, on_epoch=False, prog_bar=False, logger=True)
-        self.log("train/distillation_loss_ratio_ema", self.distillation_loss_ratio_ema, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log("train/lr", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
