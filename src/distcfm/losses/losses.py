@@ -77,7 +77,7 @@ def get_consistency_loss_fn(cfg, SI):
         # Standard FM target
         fm_target = x1 - x0
         
-        if cfg.loss.model_guidance and step > cfg.trainer.model_guidance_warmup_steps:
+        if (cfg.loss.model_guidance) and (step > cfg.trainer.num_model_guidance_steps):
             assert len(cfg.model.model_guidance_class_ws) > 0, "Model guidance class weights must be provided."
             ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
             cfg_scale = ws[torch.randint(len(ws), (N,), device=device)]
@@ -171,7 +171,7 @@ def get_consistency_loss_fn(cfg, SI):
             expanded_s = broadcast_to_shape(s, x1.shape)
             Is = (1 - expanded_s) * x0 + expanded_s * x1
             
-            if cfg.loss.model_guidance:
+            if (cfg.loss.model_guidance) and (step > cfg.trainer.num_model_guidance_steps):
                 ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
                 cfg_scale = ws[torch.randint(len(ws), (N,), device=device)]
                 p = cfg.loss.model_guidance_distill_base_prob
