@@ -47,7 +47,6 @@ lr:
 trainer:
   num_train_steps: 100000 
   num_warmup_steps: 10000 
-  model_guidance_warmup_steps: 10000
   num_no_posterior_steps: 0
   num_anneal_posterior_steps: 0
   t_cond_warmup_steps: 0
@@ -62,7 +61,7 @@ trainer:
   log_every_n_steps: 25
   accumulate_grad_batches: 1
   precision: "bf16-mixed"
-  gradient_clip_val: 0.1
+  gradient_clip_val: 1.0
 
 sampling:
   every_n_steps: 10000
@@ -84,7 +83,8 @@ sampling:
   - 0.40
   n_kernel_steps: 
   - 1
-  - 5
+  - 4
+  - 10
   kernel_cfg_scales: # for unconditional sampling (kernel)
   - 1.0
   - 1.5

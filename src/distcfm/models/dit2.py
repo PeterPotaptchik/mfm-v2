@@ -102,7 +102,7 @@ class GuidanceEmbedderJoint(nn.Module):
         xcond_idx = torch.argmin(x_cond_diff, dim=1) # (B,)
         # get combined index
         n_x = len(self.x_cond_ws_set)
-        combined_indices = class_idx * n_x + xcond_idx              # (B,)
+        combined_indices = class_idx + xcond_idx * n_x            # (B,)
         return self.embedding_table(combined_indices)   
 
 #################################################################################

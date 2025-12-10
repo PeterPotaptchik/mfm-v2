@@ -248,8 +248,7 @@ class TrainingModule(pl.LightningModule):
             mask = torch.bernoulli(torch.full(labels.shape, 1 - prob, device=self.device)).bool()
             labels = torch.where(mask, labels, self.null_class_token.expand_as(labels))
 
-        ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, self.global_step, 
-                                                        ema_state=self._get_ema_callback(), teacher_model=self.teacher_model)
+        ema_val_loss, ema_val_aux_losses = self.loss_fn(self.model, self.weighting_model, x, labels, self.global_step, teacher_model=self.teacher_model)
         for name, loss in ema_val_loss.items():
             self.log(f"val_ema/{name}", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         for name, loss in ema_val_aux_losses.items():

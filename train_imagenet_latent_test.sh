@@ -4,11 +4,11 @@
 #SBATCH --account=kempner_albergo_lab
 #SBATCH --partition=kempner_h100
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=3
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=22
 #SBATCH --mem=100GB
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/new-outputs/imagenet/imagenet_train-%A.out
 #SBATCH --error=/n/netscratch/albergo_lab/Lab/ppotaptchik/distributional-mf/new-outputs/imagenet/imagenet_train-%A.err
 #SBATCH --mail-type=END,FAIL
@@ -23,7 +23,7 @@ source .venv/bin/activate
 ########################################
 
 # How many GPUs per node will torchrun use?
-GPUS_PER_NODE=1   
+GPUS_PER_NODE=4   
 
 # Total number of nodes from Slurm
 export NNODES="${SLURM_NNODES}"
@@ -103,14 +103,14 @@ srun bash -c '
     ++lr.scheduler=constant \
     ++lr.warmup_steps=1000 \
     ++trainer.num_warmup_steps=5000 \
-    ++trainer.num_train_steps=500000 \
+    ++trainer.num_train_steps=100000 \
     ++trainer.batch_size=34 \
     ++trainer.num_workers=20 \
     ++trainer.class_dropout_prob=0.2 \
     ++data_dir=/n/holylfs06/LABS/kempner_shared/Everyone/testbed/vision/imagenet_1k \
     ++loss.explicit_v00_train=false \
     ++trainer.anneal_end_step=10000 \
-    ++loss.distillation_type=psd \
+    ++loss.distillation_type=mf \
     ++trainer.accumulate_grad_batches=2 \
     ++compile=false \
     ++optimizer=RAdam \
@@ -122,7 +122,8 @@ srun bash -c '
     ++use_parametrization=False \
     ++trainer.checkpoint_every_n_steps=10000 \
     ++weight_decay=0.00 \
-    +init_from_sit=True
+    +init_from_sit=True \
+    ++loss.model_guidance=False 
   '
     # "resume_from_checkpoint=\"$MODEL_CHECKPOINT\""
 
