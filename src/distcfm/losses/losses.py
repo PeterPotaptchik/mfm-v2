@@ -77,7 +77,7 @@ def get_consistency_loss_fn(cfg, SI):
         # Standard FM target
         fm_target = x1 - x0
         
-        if cfg.loss.model_guidance:
+        if cfg.loss.model_guidance and step > cfg.trainer.model_guidance_warmup_steps:
             assert len(cfg.model.model_guidance_class_ws) > 0, "Model guidance class weights must be provided."
             ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
             cfg_scale = ws[torch.randint(len(ws), (N,), device=device)]
@@ -105,7 +105,8 @@ def get_consistency_loss_fn(cfg, SI):
             fm_pred, fm_target, fm_loss_weighting, 
             cfg.loss.fm_loss_type,
             adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
-            adaptive_c=cfg.loss.get("fm_adaptive_loss_c")
+            adaptive_c=cfg.loss.get("fm_adaptive_loss_c"),
+            stop_gradient=True
         )
         
         # for logging 
