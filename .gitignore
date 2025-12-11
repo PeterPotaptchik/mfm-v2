@@ -222,3 +222,4 @@ decoded_latents.png
 decoded_pairs.png
 ckpt/
 .vscode/
+process_imagenet.py
