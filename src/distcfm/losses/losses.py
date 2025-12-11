@@ -76,7 +76,7 @@ def get_consistency_loss_fn(cfg, SI):
 
         # Standard FM target
         fm_target = x1 - x0
-        
+
         if (cfg.loss.model_guidance) and (step > cfg.trainer.num_model_guidance_steps):
             assert len(cfg.model.model_guidance_class_ws) > 0, "Model guidance class weights must be provided."
             ws = torch.tensor(cfg.model.model_guidance_class_ws, device=device)
@@ -94,7 +94,7 @@ def get_consistency_loss_fn(cfg, SI):
 
         fm_pred = model.v(s_uniform, s_uniform, Is, t_cond, xt_cond, class_labels=labels, 
                           cfg_scale=cfg_scales_fm)
-                
+
         if cfg.model.learn_loss_weighting:
             fm_loss_weighting = weighting_model(s_uniform, t_cond)
         else:
@@ -112,7 +112,12 @@ def get_consistency_loss_fn(cfg, SI):
         # for logging 
         with torch.no_grad():
             fm_loss_l2 = (fm_pred - fm_target)**2
-            fm_loss_l2 = fm_loss_l2.mean()
+            if (cfg.loss.model_guidance) and (step > cfg.trainer.num_model_guidance_steps):
+                fm_loss_l2_base = fm_loss_l2[cfg_mask].mean()
+                fm_loss_l2_mg = fm_loss_l2[~cfg_mask].mean()
+            else:
+                fm_loss_l2_base = fm_loss_l2.mean()
+                fm_loss_l2_mg = torch.tensor(0.0, device=device)
 
         # Distilled FM Loss
         distill_fm_loss = torch.tensor(0.0, device=device)
@@ -236,7 +241,8 @@ def get_consistency_loss_fn(cfg, SI):
         return {"fm_loss": fm_loss, "distill_fm_loss": distill_fm_loss, "distillation_loss": distillation_loss}, {"fm_loss_unweighted": fm_loss_unweighted, 
                                                                                                                   "distill_fm_loss_unweighted": distill_fm_loss_unweighted,
                                                                                                                   "distillation_loss_unweighted": distillation_loss_unweighted, 
-                                                                                                                  "fm_loss_l2": fm_loss_l2,
+                                                                                                                  "fm_loss_l2_base": fm_loss_l2_base,
+                                                                                                                  "fm_loss_l2_mg": fm_loss_l2_mg,
                                                                                                                   "distill_fm_loss_l2": distill_fm_loss_l2,
                                                                                                                   "distillation_loss_l2": distillation_loss_l2}
 
