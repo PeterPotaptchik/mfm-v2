@@ -86,8 +86,10 @@ def get_consistency_loss_fn(cfg, SI):
             cfg_scales_fm = torch.where(cfg_mask, torch.ones_like(cfg_scale, device=device), cfg_scale)
             with torch.no_grad():
                 fm_cfg_target = model.v_cfg(s_uniform, s_uniform, Is, t_cond, xt_cond, 
-                                           class_labels=labels, cfg_scales=cfg_scales_fm)
-            # if cfg_mask is True, use standard fm_target, else use fm_cfg_target
+                                            class_labels=labels, cfg_scales=cfg_scales_fm,
+                                            model_guidance_target=True)
+                fm_cfg_target = fm_cfg_target.detach()
+                fm_cfg_target += fm_target
             fm_target = torch.where(broadcast_to_shape(cfg_mask, fm_target.shape), fm_target, fm_cfg_target)
         else:
             cfg_scales_fm = torch.ones(N, device=device)
@@ -106,7 +108,6 @@ def get_consistency_loss_fn(cfg, SI):
             cfg.loss.fm_loss_type,
             adaptive_p=cfg.loss.get("fm_adaptive_loss_p"),
             adaptive_c=cfg.loss.get("fm_adaptive_loss_c"),
-            stop_gradient=True
         )
         
         # for logging 

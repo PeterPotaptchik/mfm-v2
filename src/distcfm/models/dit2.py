@@ -401,7 +401,7 @@ class DiTMFM(BaseModel):
         v = self.dit(s, t, x, t_cond, x_cond, class_labels, **kwargs)
         return v
     
-    def v_cfg(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, return_seperate=False):
+    def v_cfg(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, return_seperate=False, model_guidance_target=False):
         assert torch.equal(s, t), "implemented for velocity only!"
         device = s.device
         s_2 = torch.cat([s, s], dim=0)
@@ -416,7 +416,11 @@ class DiTMFM(BaseModel):
         v_uncond, v_cond = v.chunk(2, dim=0)
         if return_seperate:
             return v_uncond, v_cond
-        return v_uncond + broadcast_to_shape(cfg_scales, v_uncond.shape) * (v_cond - v_uncond)
+        
+        if model_guidance_target: # remove v_cond contribution
+            return v_uncond*(1 - broadcast_to_shape(cfg_scales, v_uncond.shape)) + broadcast_to_shape(cfg_scales - 1, v_cond.shape) * v_cond
+        else:
+            return v_uncond + broadcast_to_shape(cfg_scales, v_uncond.shape) * (v_cond - v_uncond)
     
     def v_cfg_mfm(self, s, t, x, t_cond, x_cond, class_labels, cfg_scales, x_cond_scales):
         assert torch.equal(s, t), "implemented for velocity only!"

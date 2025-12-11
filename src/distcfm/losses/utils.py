@@ -45,7 +45,6 @@ def adaptive_loss(pred, target, weighting, p, c, stop_gradient=False):
     weight = broadcast_to_shape(weight, delta_sq.shape)
     delta_sq = delta_sq * weight
     weighted_delta_sq = delta_sq / weighting.exp() + weighting
-    #TODO: Order of weighting?
     return torch.mean(weighted_delta_sq), torch.mean(delta_sq).detach()
 
 def compute_loss(pred, target, weighting, loss_type, adaptive_p=None, adaptive_c=None, stop_gradient=False):
