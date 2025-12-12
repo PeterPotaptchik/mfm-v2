@@ -707,7 +707,7 @@ class SamplingCallback(Callback):
             "global_step": pl_module.global_step
         })
         plt.close(fig)
-        torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))
+        # torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))
 
     def _save_samples_unconditional(self, pl_module, samples, title):
         save_dir = os.path.join(self.cfg.work_dir, f"samples_{pl_module.global_step}_ema")
@@ -729,9 +729,9 @@ class SamplingCallback(Callback):
             "global_step": pl_module.global_step
         })
 
-        torchvision.utils.save_image(
-            grid,
-            os.path.join(save_dir, f"{base_name}.png"),
-        )
+        # torchvision.utils.save_image(
+        #     grid,
+        #     os.path.join(save_dir, f"{base_name}.png"),
+        # )
         
-        torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))
+        # torch.save(save_dict, os.path.join(save_dir, f"{base_name}.pt"))

@@ -198,16 +198,6 @@ def main(cfg: DictConfig):
         target_model = train_module.model.model
         if hasattr(target_model, "dit"):
             target_model = target_model.dit
-        
-        # # Handle proj_head renaming
-        # keys_to_rename = []
-        # for k in sit_state_dict.keys():
-        #     if k.startswith("p`rojectors.0."):
-        #         keys_to_rename.append(k)
-        
-        # for k in keys_to_rename:
-        #     new_k = k.replace("projectors.0.", "proj_head.")
-        #     sit_state_dict[new_k] = sit_state_dict.pop(k)
 
         # Load state dict
         print("Loading state dict into DiT...")
@@ -276,64 +266,7 @@ def main(cfg: DictConfig):
 
     resume_path = cfg.get("resume_from_checkpoint")
     ckpt_path = resume_path
-    
-    if resume_path:
-        print(f"Attempting to load checkpoint: {resume_path}")
-        ckpt = torch.load(resume_path, map_location="cpu")
-
-        # Adapt checkpoint if necessary (e.g. for joint attention)
-        adapt_checkpoint_for_joint_attention(ckpt["state_dict"], train_module.state_dict())
-
-        print("Checking for missing/unexpected keys...")
-        missing_keys, unexpected_keys = train_module.load_state_dict(
-            ckpt["state_dict"], strict=False
-        )
-
-        if missing_keys:
-            print("\nMissing keys (reinitialized):")
-            for key in missing_keys[:10]:
-                print(f"  - {key}")
-            if len(missing_keys) > 10:
-                print(f"  ... and {len(missing_keys) - 10} more")
-        else:
-            print("No missing keys detected")
-
-        if unexpected_keys:
-            print("\nUnexpected keys (ignored):")
-            for key in unexpected_keys[:10]:
-                print(f"  - {key}")
-            if len(unexpected_keys) > 10:
-                print(f"  ... and {len(unexpected_keys) - 10} more")
-
-        removed_state = False
-        if ckpt.pop("optimizer_states", None) is not None:
-            removed_state = True
-            print("Removed optimizer_states to start with a fresh optimizer")
-        if ckpt.pop("lr_schedulers", None) is not None:
-            removed_state = True
-            print("Removed lr_schedulers to reset scheduler state")
-
-        if removed_state:
-            ckpt_path = None
-            print("Checkpoint missing optimizer state; trainer will start with fresh optimizer state\n")
-        else:
-            print("Checkpoint already weights-only; will rely on Lightning to restore remaining state\n")
-
-        # Check if joint attention components are missing and initialize them if needed
-        target_model = train_module.model.model
-        if hasattr(target_model, "dit"):
-            target_model = target_model.dit
-            
-        # Check if any joint attention related keys are missing
-        joint_attn_missing = any("joint_attn" in k for k in missing_keys)
-        x_cond_missing = any("x_cond_embedder" in k for k in missing_keys)
-        
-        if joint_attn_missing or x_cond_missing:
-            print("Detected missing joint attention or x_cond keys in checkpoint. Initializing them from existing weights...")
-            initialize_joint_attention_components(target_model)
-
     trainer.fit(train_module, datamodule=datamodule, ckpt_path=ckpt_path)
-
 
 if __name__ == "__main__":
     main()

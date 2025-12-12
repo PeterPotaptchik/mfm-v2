@@ -49,12 +49,13 @@ job_commands+=("torchrun --nproc_per_node=2 --nnodes=1 scripts/train.py --config
         ++trainer.t_cond_warmup_steps=0 \
         ++trainer.t_cond_0_rate=0.1 \
         ++trainer.t_cond_power=1.25 \
-        ++sampling.every_n_steps=5000 \
-        ++trainer.checkpoint_every_n_steps=2000 \
+        ++sampling.every_n_steps=10000 \
+        ++trainer.checkpoint_every_n_steps=25000 \
         ++use_parametrization=False \
         ++weight_decay=0.00 \
         +init_from_sit=True \
-        ++init_weights_ckpt=\"/vols/bitbucket/saravanan/mfm-v2/ckpt/dmf_xl_2_256.pt\"")
-
+        ++init_weights_ckpt=\"/vols/bitbucket/saravanan/mfm-v2/ckpt/dmf_xl_2_256.pt\" \
+        ++resume_from_checkpoint=\"/homes/saravanan/mfm_outputs/2025-12-11/21-14-59/checkpoints/periodic-epoch_03-step_25000.ckpt\"")
+        
 command=${job_commands[$SLURM_ARRAY_TASK_ID]}
 eval $command
